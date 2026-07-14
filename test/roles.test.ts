@@ -1,6 +1,7 @@
+import type { Model } from "@earendil-works/pi-ai";
 import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { beforeEach, describe, expect, it } from "vitest";
-import { resolveAllRoles, resolveRole, rolesForTier, shortModelLabel } from "../extensions/model-router/roles.ts";
+import { orderModelsForRole, resolveAllRoles, resolveRole, rolesForTier, shortModelLabel } from "../extensions/model-router/roles.ts";
 import { DEFAULT_CONFIG } from "../extensions/model-router/config.ts";
 import type { ResolvedRole, RoleName, RouterConfig } from "../extensions/model-router/types.ts";
 
@@ -177,5 +178,88 @@ describe("shortModelLabel", () => {
 		const registry = registryWithAuth(["anthropic"]);
 		const r = resolveRole(registry, "validator", { model: "nope/nothing", thinking: "medium" }, ["skip"]);
 		expect(shortModelLabel(r)).toBe("—");
+	});
+});
+
+describe("resolveRole — pi-delegated non-wildcard resolution", () => {
+	it("resolves a bare model id with no provider prefix", () => {
+		const registry = registryWithAuth(["anthropic"]);
+		const r = resolveRole(registry, "validator", { model: "claude-fable-5", thinking: "medium" }, []);
+		expect(r.skipped).toBe(false);
+		expect(r.model?.provider).toBe("anthropic");
+		expect(r.model?.id).toBe("claude-fable-5");
+		expect(r.thinking).toBe("medium"); // no ":thinking" suffix in the spec — configured level applies
+	});
+
+	it('overrides the configured thinking level when the spec carries a ":thinking" suffix', () => {
+		const registry = registryWithAuth(["anthropic"]);
+		const r = resolveRole(registry, "executor", { model: "anthropic/claude-sonnet-5:high", thinking: "medium" }, []);
+		expect(r.model?.id).toBe("claude-sonnet-5");
+		expect(r.thinking).toBe("high"); // spec-embedded level wins over the configured "medium"
+	});
+
+	it("prefers the alias id over the dated id on a fuzzy (non-exact, non-wildcard) spec", () => {
+		const registry = registryWithAuth(["anthropic"]);
+		// "opus-4-5" is a substring of both "claude-opus-4-5" (alias) and
+		// "claude-opus-4-5-20251101" (dated) — pi's fuzzy matcher prefers the alias.
+		const r = resolveRole(registry, "planner", { model: "anthropic/opus-4-5", thinking: "high" }, []);
+		expect(r.model?.id).toBe("claude-opus-4-5");
+	});
+
+	it("does not fabricate a placeholder model for an unmatched id under a known provider", () => {
+		// pi's own resolveCliModel synthesizes a placeholder Model for CLI convenience
+		// when a provider is recognized but the id isn't (so users can type not-yet-
+		// registered ids). The router must reject that and stay unresolved instead —
+		// silently driving requests at a made-up model is worse than a warning.
+		const registry = registryWithAuth(["anthropic"]);
+		const r = resolveRole(registry, "executor", { model: "anthropic/claude-totally-made-up-id", thinking: "medium" }, []);
+		expect(r.skipped).toBe(false);
+		expect(r.model).toBeUndefined();
+	});
+
+	it("still resolves an exact provider/id spec that has no alias/dated ambiguity", () => {
+		const registry = registryWithAuth(["anthropic"]);
+		const r = resolveRole(registry, "toolParser", { model: "anthropic/claude-haiku-4-5", thinking: "off" }, []);
+		expect(r.model?.id).toBe("claude-haiku-4-5");
+		expect(r.thinking).toBe("off");
+	});
+});
+
+describe("orderModelsForRole", () => {
+	// Model<any> requires several other fields (name, api, baseUrl, cost, ...)
+	// that this ordering logic never reads — "as unknown as" is the same
+	// partial-fake-data pattern test/index.test.ts uses for FAKE_MODELS.
+	function m(provider: string, id: string): Model<any> {
+		return { provider, id } as unknown as Model<any>;
+	}
+
+	it("orders the current session model first", () => {
+		const all = [m("anthropic", "claude-opus-4-8"), m("anthropic", "claude-fable-5"), m("anthropic", "claude-sonnet-5")];
+		const out = orderModelsForRole({ all, currentModel: m("anthropic", "claude-fable-5"), scopedIds: new Set(), hasAuth: () => false });
+		expect(out[0]).toEqual(m("anthropic", "claude-fable-5"));
+	});
+
+	it("orders scoped models ahead of authed-but-unscoped models, which are ahead of the rest", () => {
+		const all = [m("anthropic", "claude-opus-4-8"), m("anthropic", "claude-fable-5"), m("anthropic", "claude-sonnet-5")];
+		const out = orderModelsForRole({
+			all,
+			currentModel: undefined,
+			scopedIds: new Set(["anthropic/claude-fable-5"]),
+			hasAuth: (mm) => mm.id === "claude-opus-4-8",
+		});
+		expect(out.map((mm) => mm.id)).toEqual(["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5"]);
+	});
+
+	it("breaks ties within the same rank alphabetically by provider/id", () => {
+		const all = [m("anthropic", "claude-sonnet-5"), m("anthropic", "claude-fable-5")];
+		const out = orderModelsForRole({ all, currentModel: undefined, scopedIds: new Set(), hasAuth: () => false });
+		expect(out.map((mm) => mm.id)).toEqual(["claude-fable-5", "claude-sonnet-5"]);
+	});
+
+	it("does not mutate the input array", () => {
+		const all = [m("anthropic", "claude-sonnet-5"), m("anthropic", "claude-fable-5")];
+		const copy = [...all];
+		orderModelsForRole({ all, currentModel: undefined, scopedIds: new Set(), hasAuth: () => false });
+		expect(all).toEqual(copy);
 	});
 });

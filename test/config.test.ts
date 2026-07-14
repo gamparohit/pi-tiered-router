@@ -94,6 +94,18 @@ describe("loadConfig", () => {
 		expect(warnings.some((w) => w.includes("classifier"))).toBe(true);
 	});
 
+	it("repairs an invalid routing.planGate", () => {
+		const { config, warnings } = loadConfig(tmpDir, true, paths({ routing: { planGate: "sometimes" } }));
+		expect(config.routing.planGate).toBe("off");
+		expect(warnings.some((w) => w.includes("planGate"))).toBe(true);
+	});
+
+	it("preserves a valid routing.planGate", () => {
+		const { config, warnings } = loadConfig(tmpDir, true, paths({ routing: { planGate: "replace-validator" } }));
+		expect(config.routing.planGate).toBe("replace-validator");
+		expect(warnings).toEqual([]);
+	});
+
 	it("repairs an invalid modes.default", () => {
 		const { config, warnings } = loadConfig(tmpDir, true, paths({ modes: { default: "sleep" } }));
 		expect(config.modes.default).toBe("agent");

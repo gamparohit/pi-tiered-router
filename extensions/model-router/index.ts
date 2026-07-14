@@ -2,14 +2,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { StringEnum } from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, resolveModelScopeWithDiagnostics, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { CONFIG_FILENAME, globalConfigPath, loadConfig, PRESET_NAMES, VALID_THINKING } from "./config.ts";
 import { checkReadOnly } from "./guard.ts";
 import { isReadOnlyMode, ModeState, describeMode, modeSystemPromptAddendum } from "./modes.ts";
 import { applyRoleForTurn, type PipelineApplyResult, planAndValidate, runAgentPipeline, runAskMode } from "./pipeline.ts";
-import { describeRole, resolveAllRoles, rolesForTier } from "./roles.ts";
+import { describeRole, modelKey, orderModelsForRole, resolveAllRoles, rolesForTier } from "./roles.ts";
 import { nextTierUp } from "./router.ts";
 import { SessionStats } from "./stats.ts";
 import { runSubagents, type SubagentTask } from "./subagents.ts";
@@ -18,6 +19,8 @@ import {
 	type Complexity,
 	MODE_NAMES,
 	type ModeName,
+	type PlanGate,
+	PLAN_GATE_MODES,
 	type ResolvedRole,
 	ROLE_NAMES,
 	type RoleName,
@@ -161,18 +164,54 @@ export default function (pi: ExtensionAPI) {
 		return role === "validator" || role === "toolParser";
 	}
 
-	/** Prompt for a role's model: real registry models (authed first) plus keep/custom/skip. Returns undefined if the user cancels. */
-	async function selectModelForRole(ctx: ExtensionCommandContext, role: RoleName): Promise<RoleSelection | undefined> {
+	/** One-line explanation of each role, shown in its setup-wizard picker title. */
+	const ROLE_DESCRIPTIONS: Record<RoleName, string> = {
+		planner: "decomposes the goal into a numbered plan",
+		validator: "independently critiques the plan before execution (up to 2 revision rounds)",
+		executor: "writes the code once the plan is validated",
+		toolParser: "classifies task complexity and compresses noisy tool output",
+	};
+
+	/**
+	 * Resolve pi's scoped-model patterns (Settings.enabledModels — the set the
+	 * user curates for Ctrl+P cycling) to actual models, so the wizard can offer
+	 * only the models the user already scoped instead of the entire registry.
+	 * Best-effort: any failure, or no scope configured, returns an empty array —
+	 * the caller falls back to the full registry rather than showing an empty
+	 * picker.
+	 */
+	async function resolveScopedModels(ctx: ExtensionCommandContext): Promise<Model<any>[]> {
+		try {
+			const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
+			const patterns = settings.getEnabledModels();
+			if (!patterns || patterns.length === 0) return [];
+			const { scopedModels } = await resolveModelScopeWithDiagnostics(patterns, ctx.modelRegistry);
+			return scopedModels.map((sm) => sm.model);
+		} catch {
+			return [];
+		}
+	}
+
+	/** Prompt for a role's model: only models in the user's pi model scope (falling back to the full registry when no scope is configured), current session model marked and surfaced first, plus keep/custom/skip. Returns undefined if the user cancels. */
+	async function selectModelForRole(
+		ctx: ExtensionCommandContext,
+		role: RoleName,
+		scopedModels: Model<any>[],
+	): Promise<RoleSelection | undefined> {
 		const current = roles?.[role];
-		const all = ctx.modelRegistry.getAll();
-		const sorted = [...all].sort((a, b) => {
-			const aAuth = ctx.modelRegistry.hasConfiguredAuth(a) ? 1 : 0;
-			const bAuth = ctx.modelRegistry.hasConfiguredAuth(b) ? 1 : 0;
-			if (aAuth !== bAuth) return bAuth - aAuth;
-			return `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`);
+		const pool = scopedModels.length > 0 ? scopedModels : ctx.modelRegistry.getAll();
+		const sorted = orderModelsForRole({
+			all: pool,
+			currentModel: ctx.model,
+			scopedIds: new Set(scopedModels.map(modelKey)),
+			hasAuth: (m) => ctx.modelRegistry.hasConfiguredAuth(m),
 		});
-		const modelLabel = (m: (typeof sorted)[number]) =>
-			`${ctx.modelRegistry.hasConfiguredAuth(m) ? "✓" : " "} ${m.provider}/${m.id}`;
+		const modelLabel = (m: (typeof sorted)[number]) => {
+			const key = modelKey(m);
+			const scopeMark = ctx.model && modelKey(ctx.model) === key ? "▶" : " ";
+			const authMark = ctx.modelRegistry.hasConfiguredAuth(m) ? "✓" : " ";
+			return `${scopeMark}${authMark} ${key}`;
+		};
 
 		const keepLabel = `Keep current (${current?.skipped ? "skipped" : (current?.resolvedId ?? `unresolved: ${current?.requested}`)})`;
 		const customLabel = "Custom spec… (type provider/model-id, wildcards like anthropic/claude-opus-* allowed)";
@@ -180,7 +219,7 @@ export default function (pi: ExtensionAPI) {
 		const canSkip = roleCanBeSkipped(role);
 
 		const options = [keepLabel, ...sorted.map(modelLabel), customLabel, ...(canSkip ? [skipLabel] : [])];
-		const picked = await ctx.ui.select(`Model for the "${role}" role`, options);
+		const picked = await ctx.ui.select(`Model for the "${role}" role — ${ROLE_DESCRIPTIONS[role]}`, options);
 		if (picked === undefined) return undefined;
 
 		if (picked === keepLabel) return { kind: "keep" };
@@ -268,11 +307,20 @@ export default function (pi: ExtensionAPI) {
 	 * check `ctx.hasUI` first.
 	 */
 	async function runSetupWizard(ctx: ExtensionCommandContext, targetRoles: RoleName[]): Promise<void> {
+		const scopedModels = await resolveScopedModels(ctx);
+		notify(
+			ctx,
+			scopedModels.length > 0
+				? `Showing your pi model scope (${scopedModels.length} models). ▶ current session model   ✓ auth configured`
+				: "No pi model scope configured — showing the full model registry. ▶ current session model   ✓ auth configured",
+			"info",
+		);
+
 		const updates: Partial<Record<RoleName, { model: string; thinking: ThinkingLevel }>> = {};
 		const changedRoles: RoleName[] = [];
 
 		for (const role of targetRoles) {
-			const selection = await selectModelForRole(ctx, role);
+			const selection = await selectModelForRole(ctx, role, scopedModels);
 			if (!selection || selection.kind === "keep") continue;
 
 			if (selection.kind === "skip") {
@@ -354,7 +402,11 @@ export default function (pi: ExtensionAPI) {
 			const anyUnresolved = ROLE_NAMES.some((r) => !roles![r].model && !roles![r].skipped);
 			if (noConfigYet && anyUnresolved) {
 				firstRunHintShown = true;
-				notify(ctx, 'model-router: some roles are unresolved and no config file exists yet — run "/router setup" to configure all four interactively.', "info");
+				notify(
+					ctx,
+					'model-router: some roles are unresolved and no config file exists yet — run "/router setup" to configure all four interactively (or "/router help" to see all subcommands).',
+					"info",
+				);
 			}
 		}
 	});
@@ -456,10 +508,53 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	const ROUTER_SUBCOMMANDS: { value: string; description: string }[] = [
+		{ value: "setup", description: "guided setup for all four roles" },
+		{ value: "config", description: "guided setup for one role" },
+		{ value: "reload", description: "re-read config files and re-resolve roles" },
+		{ value: "auto", description: "resume auto-routing after a manual model/thinking override" },
+		{ value: "last", description: "show the last pipeline run's trace notes" },
+		{ value: "stats", description: "session token/cost stats" },
+		{ value: "trace", description: "show debug-mode wire-trace status" },
+		{ value: "trace on", description: "enable debug-mode wire tracing" },
+		{ value: "trace off", description: "disable debug-mode wire tracing" },
+		{ value: "toolparse on", description: "enable tool-output compression" },
+		{ value: "toolparse off", description: "disable tool-output compression" },
+		{ value: "gate", description: "show the plan-approval gate mode" },
+		{ value: "gate off", description: "disable the human plan gate" },
+		{ value: "gate replace-validator", description: "human gate replaces the automated validator" },
+		{ value: "gate after-validator", description: "human gate runs after the automated validator" },
+		{ value: "help", description: "show this list" },
+	];
+
+	const GATE_DESCRIPTIONS: Record<PlanGate, string> = {
+		off: "fully automated — no plan approval prompt",
+		"replace-validator": "you review the plan; the automated validator is skipped",
+		"after-validator": "the automated validator runs first, then you review",
+	};
+
+	const ROUTER_HELP = [
+		"/router subcommands:",
+		...ROUTER_SUBCOMMANDS.map((c) => `  ${c.value.padEnd(14)} ${c.description}`),
+		"",
+		"/router (no args) shows the status dashboard.",
+	].join("\n");
+
 	pi.registerCommand("router", {
-		description: "model-router status dashboard: resolved roles, mode, config sources",
+		description: "model-router status dashboard: resolved roles, mode, config sources — try /router help",
+		getArgumentCompletions: (prefix) =>
+			ROUTER_SUBCOMMANDS.filter((c) => c.value.startsWith(prefix.toLowerCase())).map((c) => ({
+				value: c.value,
+				label: c.value,
+				description: c.description,
+			})),
 		handler: async (args, ctx: ExtensionCommandContext) => {
 			const sub = args.trim().toLowerCase();
+
+			if (sub === "help") {
+				notify(ctx, ROUTER_HELP, "info");
+				return;
+			}
 
 			if (sub === "reload") {
 				reload(ctx);
@@ -475,6 +570,27 @@ export default function (pi: ExtensionAPI) {
 
 			if (sub === "stats") {
 				notify(ctx, stats.summarize(), "info");
+				return;
+			}
+
+			if (sub === "gate" || sub.startsWith("gate ")) {
+				if (!config) {
+					notify(ctx, "not initialized yet", "warning");
+					return;
+				}
+				const arg = sub.slice("gate".length).trim();
+				if (!arg) {
+					const current = (config.routing.planGate ?? "off") as PlanGate;
+					notify(ctx, `plan gate: ${current} — ${GATE_DESCRIPTIONS[current]} (agent/debug modes only)`, "info");
+					return;
+				}
+				if (!PLAN_GATE_MODES.includes(arg as PlanGate)) {
+					notify(ctx, `Unknown gate mode "${arg}". Valid: ${PLAN_GATE_MODES.join(", ")}`, "error");
+					return;
+				}
+				// Session-only, like toolparse/trace — a `/router reload` re-reads the file value.
+				config.routing.planGate = arg as PlanGate;
+				notify(ctx, `plan gate: ${arg} — ${GATE_DESCRIPTIONS[arg as PlanGate]}`, "info");
 				return;
 			}
 
@@ -533,6 +649,11 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			if (sub !== "") {
+				notify(ctx, `Unknown /router subcommand "${sub}".\n\n${ROUTER_HELP}`, "warning");
+				return;
+			}
+
 			const lines = [
 				`mode: ${modeState.current} (${describeMode(modeState.current)})`,
 				overridePinned ? "routing: PINNED (manual model override active — /router auto to resume)" : "routing: auto",
@@ -542,11 +663,14 @@ export default function (pi: ExtensionAPI) {
 				"",
 				`routing.classifier: ${config.routing.classifier}`,
 				`routing.trivialBypass: ${config.routing.trivialBypass}`,
+				`routing.planGate: ${config.routing.planGate ?? "off"} (agent/debug; /router gate to change)`,
 				`routing.toolOutputParseThreshold: ${config.routing.toolOutputParseThreshold}B (toolparse: ${toolparseEnabled ? "on" : "off"})`,
 				`routing.tiers: ${config.routing.tiers ? Object.keys(config.routing.tiers).join(", ") : "not configured"}${pinnedTier ? ` — pinned this session at "${pinnedTier}"` : ""}${consecutiveToolFailures > 0 ? ` (${consecutiveToolFailures}/${TOOL_FAILURE_ESCALATION_THRESHOLD} consecutive tool failures)` : ""}`,
 				`subagents: ${config.subagents.enabled ? `enabled (max ${config.subagents.maxParallel}, timeout ${config.subagents.timeoutMs}ms)` : "disabled"}`,
 				"",
 				stats.summarize(),
+				"",
+				'Run "/router help" to see all subcommands.',
 			];
 
 			notify(ctx, lines.join("\n"), "info");

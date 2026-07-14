@@ -15,6 +15,16 @@ export type Complexity = "trivial" | "simple" | "standard" | "complex";
 
 export const COMPLEXITY_LEVELS: Complexity[] = ["trivial", "simple", "standard", "complex"];
 
+/**
+ * Human plan-approval gate (agent/debug modes only). "off": fully automated,
+ * today's behavior. "replace-validator": the human review is the only plan
+ * review — the automated validator is skipped. "after-validator": the
+ * automated validator runs first, then the human reviews the result.
+ */
+export type PlanGate = "off" | "replace-validator" | "after-validator";
+
+export const PLAN_GATE_MODES: PlanGate[] = ["off", "replace-validator", "after-validator"];
+
 /** A single role's model + effort configuration. */
 export interface RoleConfig {
 	/** "provider/model-id"; supports a trailing "*" prefix wildcard, e.g. "anthropic/claude-opus-*". */
@@ -40,6 +50,8 @@ export interface RoutingConfig {
 	 * the complexity, so the classifier always runs on the base-resolved role.
 	 */
 	tiers?: Partial<Record<Complexity, Partial<Record<RoleName, RoleConfig | "skip">>>>;
+	/** Human plan-approval gate for agent/debug modes. Defaults to "off". */
+	planGate?: PlanGate;
 }
 
 export interface SubagentConfig {

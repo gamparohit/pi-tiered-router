@@ -50,6 +50,11 @@ rather update deliberately — pinned specs are left alone by `pi update`.
    trace notes from the most recent pipeline run.
 5. Switch modes with `/mode <plan|agent|ask|debug>` or cycle through them
    with `ctrl+alt+m`.
+6. Want to approve the plan before agent/debug mode executes it? Turn on the
+   human gate with `/router gate replace-validator` (or `after-validator`) —
+   the pipeline pauses after planning so you can approve, request changes
+   (re-planned as many rounds as you like), or proceed without a plan. See
+   [`docs/configuration.md`](docs/configuration.md#plan-approval-gate).
 
 Nothing to configure for the default experience — `pi-tiered-router` ships
 with an all-Anthropic default (Opus plans, Fable validates, Sonnet executes,
@@ -60,12 +65,26 @@ ready-made config files.
 ## Setup
 
 Want to point specific roles at different models? Run `/router setup` — it
-walks all four roles in order, one at a time, offering the models your `pi`
-install actually has available (authenticated ones marked and listed first),
-plus keep-current / type-a-custom-spec / skip-this-role options, then a
-thinking-level pick per role, then one prompt for global vs. project config
-scope. `/router config` is the same wizard scoped to a single role, for a
-quick one-off change.
+walks all four roles in order, one at a time. Each role's picker is scoped to
+the models in your pi model scope (`Settings.enabledModels` — the same set
+`Ctrl+P` cycles through) when you have one configured; with no scope
+configured it falls back to the full model registry instead of showing an
+empty list. Either way, your current pi session model is marked `▶` and
+sorted first, and models with configured auth are marked `✓` — plus
+keep-current / type-a-custom-spec / skip-this-role options. A spec without a
+wildcard (an exact id, a bare id, or either with a `:thinking` suffix)
+resolves with the same matching pi's own `/model` command uses; a
+trailing-`*` wildcard spec (`anthropic/claude-opus-*`) is matched by the
+router itself, preferring whichever candidate already has auth configured.
+After a thinking-level pick per changed role, it asks once whether to save to
+the global config or the project config (project only offered when the
+project is trusted), writes the file (merged with whatever's already there),
+reloads, and shows the resolved roles.
+
+`/router config` is the same wizard scoped to a single role you pick first —
+use it for a one-off tweak instead of walking all four. Run `/router help`
+any time to see every `/router` subcommand (also available via tab-completion
+after typing `/router `).
 
 If you start a session with unresolved roles and no config file yet,
 model-router shows a one-time nudge toward `/router setup` — never a blocking

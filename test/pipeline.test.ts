@@ -278,7 +278,7 @@ describe("applyRoleForTurn", () => {
 	it("switches the model and applies escalated thinking on success", async () => {
 		const pi = fakePi(true);
 		const roles = fakeRoles();
-		const outcome = { bypassed: false, revisions: 0, notes: [] as string[], validatorRejectionsMaxedOut: false };
+		const outcome = { bypassed: false, revisions: 0, notes: [] as string[], validatorRejectionsMaxedOut: false, planDeclined: false };
 		const result = await applyRoleForTurn(pi, "executor", roles, outcome, "complex");
 		expect(pi.setModel).toHaveBeenCalledWith(roles.executor.model);
 		expect(pi.setThinkingLevel).toHaveBeenCalledWith("high"); // escalated from medium -> complex floor
@@ -289,7 +289,7 @@ describe("applyRoleForTurn", () => {
 	it("calls onBeforeModelSwitch immediately before pi.setModel, not before", async () => {
 		const pi = fakePi(true);
 		const roles = fakeRoles();
-		const outcome = { bypassed: false, revisions: 0, notes: [] as string[], validatorRejectionsMaxedOut: false };
+		const outcome = { bypassed: false, revisions: 0, notes: [] as string[], validatorRejectionsMaxedOut: false, planDeclined: false };
 		const order: string[] = [];
 		(pi.setModel as ReturnType<typeof vi.fn>).mockImplementation(async () => {
 			order.push("setModel");
@@ -306,18 +306,18 @@ describe("applyRoleForTurn", () => {
 		const roles = fakeRoles();
 		const onBeforeModelSwitch = vi.fn();
 
-		await applyRoleForTurn(pi, "executor", roles, { bypassed: false, revisions: 0, notes: [], validatorRejectionsMaxedOut: false }, undefined, true, onBeforeModelSwitch);
+		await applyRoleForTurn(pi, "executor", roles, { bypassed: false, revisions: 0, notes: [], validatorRejectionsMaxedOut: false, planDeclined: false }, undefined, true, onBeforeModelSwitch);
 		expect(onBeforeModelSwitch).not.toHaveBeenCalled();
 
 		const unresolvedRoles = fakeRoles({ executor: fakeRole("executor", { model: undefined }) });
-		await applyRoleForTurn(pi, "executor", unresolvedRoles, { bypassed: false, revisions: 0, notes: [], validatorRejectionsMaxedOut: false }, undefined, false, onBeforeModelSwitch);
+		await applyRoleForTurn(pi, "executor", unresolvedRoles, { bypassed: false, revisions: 0, notes: [], validatorRejectionsMaxedOut: false, planDeclined: false }, undefined, false, onBeforeModelSwitch);
 		expect(onBeforeModelSwitch).not.toHaveBeenCalled();
 	});
 
 	it("leaves the model unchanged when setModel fails (no API key)", async () => {
 		const pi = fakePi(false);
 		const roles = fakeRoles();
-		const outcome = { bypassed: false, revisions: 0, notes: [] as string[], validatorRejectionsMaxedOut: false };
+		const outcome = { bypassed: false, revisions: 0, notes: [] as string[], validatorRejectionsMaxedOut: false, planDeclined: false };
 		const result = await applyRoleForTurn(pi, "executor", roles, outcome, undefined);
 		expect(pi.setThinkingLevel).not.toHaveBeenCalled();
 		expect(result.appliedRole).toBeUndefined();
@@ -327,7 +327,7 @@ describe("applyRoleForTurn", () => {
 	it("skips the model switch entirely when skipModelSwitch is set (manual override pinned)", async () => {
 		const pi = fakePi(true);
 		const roles = fakeRoles();
-		const outcome = { bypassed: false, revisions: 0, notes: [] as string[], validatorRejectionsMaxedOut: false };
+		const outcome = { bypassed: false, revisions: 0, notes: [] as string[], validatorRejectionsMaxedOut: false, planDeclined: false };
 		const result = await applyRoleForTurn(pi, "executor", roles, outcome, "complex", true);
 		expect(pi.setModel).not.toHaveBeenCalled();
 		expect(pi.setThinkingLevel).not.toHaveBeenCalled();
@@ -338,7 +338,7 @@ describe("applyRoleForTurn", () => {
 	it("handles an unresolved role without switching or crashing", async () => {
 		const pi = fakePi(true);
 		const roles = fakeRoles({ executor: fakeRole("executor", { model: undefined }) });
-		const outcome = { bypassed: false, revisions: 0, notes: [] as string[], validatorRejectionsMaxedOut: false };
+		const outcome = { bypassed: false, revisions: 0, notes: [] as string[], validatorRejectionsMaxedOut: false, planDeclined: false };
 		const result = await applyRoleForTurn(pi, "executor", roles, outcome, undefined);
 		expect(pi.setModel).not.toHaveBeenCalled();
 		expect(result.appliedRole).toBeUndefined();
@@ -354,12 +354,13 @@ describe("applyRoleForTurn", () => {
 			plan: { summary: "s", steps: ["a"] },
 			planText: "Plan: s\n\n1. a",
 			validatorRejectionsMaxedOut: false,
+			planDeclined: false,
 		};
 		const result = await applyRoleForTurn(pi, "executor", roles, withPlan, undefined);
 		expect(result.message?.content).toBe("Plan: s\n\n1. a");
 		expect(result.message?.display).toBe(true);
 
-		const bypassed = { bypassed: true, revisions: 0, notes: [] as string[], validatorRejectionsMaxedOut: false };
+		const bypassed = { bypassed: true, revisions: 0, notes: [] as string[], validatorRejectionsMaxedOut: false, planDeclined: false };
 		const result2 = await applyRoleForTurn(pi, "executor", roles, bypassed, undefined);
 		expect(result2.message).toBeUndefined();
 	});

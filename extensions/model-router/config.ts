@@ -7,6 +7,8 @@ import {
 	COMPLEXITY_LEVELS,
 	MODE_NAMES,
 	type ModeName,
+	type PlanGate,
+	PLAN_GATE_MODES,
 	type RoleConfig,
 	ROLE_NAMES,
 	type RoleName,
@@ -40,6 +42,7 @@ export const DEFAULT_CONFIG: RouterConfig = {
 		classifier: "toolParser",
 		trivialBypass: true,
 		toolOutputParseThreshold: 4096,
+		planGate: "off",
 	},
 	modes: { default: "agent" },
 	subagents: { enabled: true, maxParallel: 4, timeoutMs: 10 * 60 * 1000 },
@@ -203,6 +206,11 @@ function validate(raw: RouterConfig, warnings: string[]): RouterConfig {
 	}
 	cfg.routing.trivialBypass = cfg.routing.trivialBypass !== false;
 	cfg.routing.tiers = validateTiers(cfg.routing.tiers, warnings);
+
+	if (cfg.routing.planGate !== undefined && !PLAN_GATE_MODES.includes(cfg.routing.planGate as PlanGate)) {
+		warnings.push(`routing.planGate "${String(cfg.routing.planGate)}" invalid (expected one of ${PLAN_GATE_MODES.join(", ")}); using "off".`);
+	}
+	if (!PLAN_GATE_MODES.includes(cfg.routing.planGate as PlanGate)) cfg.routing.planGate = "off";
 
 	const defMode = cfg.modes?.default;
 	if (!MODE_NAMES.includes(defMode as ModeName)) {
