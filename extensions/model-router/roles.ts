@@ -1,5 +1,6 @@
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
-import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { resolveCliModel, type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import {
 	type Complexity,
 	type ResolvedRole,
@@ -9,48 +10,63 @@ import {
 	type RouterConfig,
 } from "./types.ts";
 
-/** Split "provider/model-id" into parts. Everything after the first "/" is the id. */
-function splitSpec(spec: string): { provider: string; idPattern: string } | undefined {
-	const trimmed = spec.trim();
-	const slash = trimmed.indexOf("/");
-	if (slash <= 0 || slash === trimmed.length - 1) return undefined;
-	return { provider: trimmed.slice(0, slash), idPattern: trimmed.slice(slash + 1) };
+interface SpecResolution {
+	model: Model<any>;
+	/** Explicit ":thinking" suffix on the spec, if any — overrides the role's configured level. */
+	thinkingLevel?: ThinkingLevel;
 }
 
 /**
- * Resolve a single "provider/id" or "provider/prefix-*" spec against the registry.
- * Wildcard matches pick the "best" candidate: prefer models that already have auth
- * configured, then the lexicographically greatest id (newest point release wins for
- * date/version-suffixed ids like claude-opus-4-20250101).
+ * Resolve a single model spec against the registry. Two paths:
+ *
+ * - "provider/prefix-*" wildcards: matched by the router itself (prefer
+ *   candidates with configured auth, then the lexicographically greatest id —
+ *   newest point release wins for date-suffixed ids). pi's own resolver has
+ *   no glob support, so this stays hand-rolled.
+ * - Everything else (an exact "provider/id", a bare id, or either with a
+ *   ":thinking" suffix): delegated to pi's own `resolveCliModel`, so a config
+ *   spec resolves with the exact same semantics as pi's `/model` command
+ *   (alias-over-dated preference, fuzzy substring match, ":thinking" suffix
+ *   parsing). `resolveCliModel` also fabricates a placeholder Model for an
+ *   unmatched id under a *known* provider (pi's CLI convenience for
+ *   not-yet-registered ids) — that placeholder is rejected here since it was
+ *   never a real registry entry; the router must not silently "resolve" to a
+ *   made-up model.
  */
-function resolveSpec(registry: ModelRegistry, spec: string): Model<any> | undefined {
-	const parsed = splitSpec(spec);
-	if (!parsed) return undefined;
-	const { provider, idPattern } = parsed;
+function resolveSpec(registry: ModelRegistry, spec: string): SpecResolution | undefined {
+	const trimmed = spec.trim();
+	if (!trimmed) return undefined;
 
-	// Exact match first.
-	if (!idPattern.includes("*")) {
-		return registry.find(provider, idPattern);
+	const slash = trimmed.indexOf("/");
+	const hasProviderPrefix = slash > 0 && slash < trimmed.length - 1;
+	const idPart = hasProviderPrefix ? trimmed.slice(slash + 1) : trimmed;
+
+	if (idPart.includes("*")) {
+		if (!hasProviderPrefix) return undefined; // wildcards require an explicit "provider/" prefix
+		const provider = trimmed.slice(0, slash);
+		const prefix = idPart.replace(/\*+$/, "").replace(/[-_]$/, "");
+		const candidates = registry.getAll().filter((m) => m.provider === provider && (prefix === "" || m.id.startsWith(prefix)));
+		if (candidates.length === 0) return undefined;
+
+		const authed = new Set(candidates.filter((m) => registry.hasConfiguredAuth(m)).map((m) => m.id));
+		candidates.sort((a, b) => {
+			const aAuth = authed.has(a.id) ? 1 : 0;
+			const bAuth = authed.has(b.id) ? 1 : 0;
+			if (aAuth !== bAuth) return bAuth - aAuth; // authed first
+			return b.id.localeCompare(a.id); // newest id wins
+		});
+		return { model: candidates[0]! }; // length checked above, so index 0 is always defined
 	}
 
-	// Wildcard: strip a single trailing "*" (and any trailing separator) to get the prefix.
-	const prefix = idPattern.replace(/\*+$/, "").replace(/[-_]$/, "");
-	const all = registry.getAll();
-	const candidates = all.filter(
-		(m) => m.provider === provider && (prefix === "" || m.id.startsWith(prefix)),
-	);
-	if (candidates.length === 0) return undefined;
+	const result = resolveCliModel({ cliModel: trimmed, modelRegistry: registry });
+	if (!result.model) return undefined;
 
-	const authed = new Set(
-		candidates.filter((m) => registry.hasConfiguredAuth(m)).map((m) => m.id),
-	);
-	candidates.sort((a, b) => {
-		const aAuth = authed.has(a.id) ? 1 : 0;
-		const bAuth = authed.has(b.id) ? 1 : 0;
-		if (aAuth !== bAuth) return bAuth - aAuth; // authed first
-		return b.id.localeCompare(a.id); // newest id last-wins
-	});
-	return candidates[0];
+	// Reject resolveCliModel's fabricated placeholder: it's never reference-identical
+	// to (and won't match provider+id of) any real registry entry.
+	const isReal = registry.getAll().some((m) => m.provider === result.model!.provider && m.id === result.model!.id);
+	if (!isReal) return undefined;
+
+	return { model: result.model, thinkingLevel: result.thinkingLevel };
 }
 
 /**
@@ -63,9 +79,8 @@ export function resolveRole(
 	roleConfig: RoleConfig,
 	fallbacks: string[] = [],
 ): ResolvedRole {
-	const base: Omit<ResolvedRole, "model" | "resolvedId" | "viaFallback" | "skipped"> = {
+	const base: Pick<ResolvedRole, "role" | "requested"> = {
 		role,
-		thinking: roleConfig.thinking,
 		requested: roleConfig.model,
 	};
 
@@ -74,7 +89,7 @@ export function resolveRole(
 	// and the setup wizard offer "skip" as a role's model without the resolver
 	// treating it as an unresolvable "provider/id" spec and warning at startup.
 	if (roleConfig.model.trim().toLowerCase() === "skip") {
-		return { ...base, model: undefined, viaFallback: false, skipped: true };
+		return { ...base, model: undefined, thinking: roleConfig.thinking, viaFallback: false, skipped: true };
 	}
 
 	// Primary.
@@ -82,8 +97,9 @@ export function resolveRole(
 	if (primary) {
 		return {
 			...base,
-			model: primary,
-			resolvedId: `${primary.provider}/${primary.id}`,
+			model: primary.model,
+			resolvedId: `${primary.model.provider}/${primary.model.id}`,
+			thinking: primary.thinkingLevel ?? roleConfig.thinking,
 			viaFallback: false,
 			skipped: false,
 		};
@@ -92,14 +108,15 @@ export function resolveRole(
 	// Fallback chain.
 	for (const fb of fallbacks) {
 		if (fb === "skip") {
-			return { ...base, model: undefined, viaFallback: true, skipped: true };
+			return { ...base, model: undefined, thinking: roleConfig.thinking, viaFallback: true, skipped: true };
 		}
-		const m = resolveSpec(registry, fb);
-		if (m) {
+		const resolved = resolveSpec(registry, fb);
+		if (resolved) {
 			return {
 				...base,
-				model: m,
-				resolvedId: `${m.provider}/${m.id}`,
+				model: resolved.model,
+				resolvedId: `${resolved.model.provider}/${resolved.model.id}`,
+				thinking: resolved.thinkingLevel ?? roleConfig.thinking,
 				viaFallback: true,
 				skipped: false,
 			};
@@ -107,7 +124,7 @@ export function resolveRole(
 	}
 
 	// Unresolved and not explicitly skipped.
-	return { ...base, model: undefined, viaFallback: false, skipped: false };
+	return { ...base, model: undefined, thinking: roleConfig.thinking, viaFallback: false, skipped: false };
 }
 
 /** Resolve all four roles. */
