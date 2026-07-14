@@ -35,15 +35,16 @@ the extension; the rest of the merge proceeds as if that file didn't exist.
 
 `/router setup` walks all four roles in order (planner → validator → executor
 → toolParser), one `ctx.ui.select` prompt per role. Each role's option list is
-ordered: the current pi session model first (marked `▶`), then models in your
-pi model scope (`◆` — pi's `Settings.enabledModels`, resolved the same way pi
-resolves `--models`), then the rest of the registry with authed models (`✓`)
-sorted ahead of unauthed ones — plus three extra choices: **keep current**,
-**custom spec…** (free-typed, wildcards allowed), and **skip this role**
-(validator/toolParser only; planner and executor are load-bearing for the
-pipeline to mean anything). Reading the scoped-model set is best-effort — if
-it can't be read, or none is configured, the wizard just falls back to the
-authed/rest ordering.
+**filtered to your pi model scope** (pi's `Settings.enabledModels` — the same
+set `Ctrl+P` cycles through, resolved the same way pi resolves `--models`)
+when you have one configured. Reading the scope is best-effort and the filter
+is never allowed to leave you with nothing to pick from: if the scope can't be
+read, or none is configured, the wizard falls back to the full model registry
+instead. Whichever list is shown, the current pi session model is marked `▶`
+and sorted first, and authed models (`✓`) sort ahead of unauthed ones — plus
+three extra choices: **keep current**, **custom spec…** (free-typed, wildcards
+allowed), and **skip this role** (validator/toolParser only; planner and
+executor are load-bearing for the pipeline to mean anything).
 
 A role's `model` spec resolves in one of two ways: a trailing-`*` wildcard
 (`anthropic/claude-opus-*`) is matched by the router itself, preferring a

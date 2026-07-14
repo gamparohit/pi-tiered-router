@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { StringEnum } from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, resolveModelScopeWithDiagnostics, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -171,40 +172,41 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * Resolve pi's scoped-model patterns (Settings.enabledModels — the set the
-	 * user curates for Ctrl+P cycling) to a "provider/id" key set, so the wizard
-	 * can surface models the user already scoped ahead of the rest of the
-	 * registry. Best-effort: any failure, or no scope configured, degrades to an
-	 * empty set rather than blocking setup — inheriting is a bonus, not a
-	 * requirement for the wizard to work.
+	 * user curates for Ctrl+P cycling) to actual models, so the wizard can offer
+	 * only the models the user already scoped instead of the entire registry.
+	 * Best-effort: any failure, or no scope configured, returns an empty array —
+	 * the caller falls back to the full registry rather than showing an empty
+	 * picker.
 	 */
-	async function resolveScopedModelIds(ctx: ExtensionCommandContext): Promise<Set<string>> {
+	async function resolveScopedModels(ctx: ExtensionCommandContext): Promise<Model<any>[]> {
 		try {
 			const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
 			const patterns = settings.getEnabledModels();
-			if (!patterns || patterns.length === 0) return new Set();
+			if (!patterns || patterns.length === 0) return [];
 			const { scopedModels } = await resolveModelScopeWithDiagnostics(patterns, ctx.modelRegistry);
-			return new Set(scopedModels.map((sm) => modelKey(sm.model)));
+			return scopedModels.map((sm) => sm.model);
 		} catch {
-			return new Set();
+			return [];
 		}
 	}
 
-	/** Prompt for a role's model: the current session model and scoped models surfaced first (marked), then authed models, plus keep/custom/skip. Returns undefined if the user cancels. */
+	/** Prompt for a role's model: only models in the user's pi model scope (falling back to the full registry when no scope is configured), current session model marked and surfaced first, plus keep/custom/skip. Returns undefined if the user cancels. */
 	async function selectModelForRole(
 		ctx: ExtensionCommandContext,
 		role: RoleName,
-		scopedIds: Set<string>,
+		scopedModels: Model<any>[],
 	): Promise<RoleSelection | undefined> {
 		const current = roles?.[role];
+		const pool = scopedModels.length > 0 ? scopedModels : ctx.modelRegistry.getAll();
 		const sorted = orderModelsForRole({
-			all: ctx.modelRegistry.getAll(),
+			all: pool,
 			currentModel: ctx.model,
-			scopedIds,
+			scopedIds: new Set(scopedModels.map(modelKey)),
 			hasAuth: (m) => ctx.modelRegistry.hasConfiguredAuth(m),
 		});
 		const modelLabel = (m: (typeof sorted)[number]) => {
 			const key = modelKey(m);
-			const scopeMark = ctx.model && modelKey(ctx.model) === key ? "▶" : scopedIds.has(key) ? "◆" : " ";
+			const scopeMark = ctx.model && modelKey(ctx.model) === key ? "▶" : " ";
 			const authMark = ctx.modelRegistry.hasConfiguredAuth(m) ? "✓" : " ";
 			return `${scopeMark}${authMark} ${key}`;
 		};
@@ -303,14 +305,20 @@ export default function (pi: ExtensionAPI) {
 	 * check `ctx.hasUI` first.
 	 */
 	async function runSetupWizard(ctx: ExtensionCommandContext, targetRoles: RoleName[]): Promise<void> {
-		const scopedIds = await resolveScopedModelIds(ctx);
-		notify(ctx, "▶ current session model   ◆ in your pi model scope   ✓ auth configured", "info");
+		const scopedModels = await resolveScopedModels(ctx);
+		notify(
+			ctx,
+			scopedModels.length > 0
+				? `Showing your pi model scope (${scopedModels.length} models). ▶ current session model   ✓ auth configured`
+				: "No pi model scope configured — showing the full model registry. ▶ current session model   ✓ auth configured",
+			"info",
+		);
 
 		const updates: Partial<Record<RoleName, { model: string; thinking: ThinkingLevel }>> = {};
 		const changedRoles: RoleName[] = [];
 
 		for (const role of targetRoles) {
-			const selection = await selectModelForRole(ctx, role, scopedIds);
+			const selection = await selectModelForRole(ctx, role, scopedModels);
 			if (!selection || selection.kind === "keep") continue;
 
 			if (selection.kind === "skip") {

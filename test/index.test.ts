@@ -35,6 +35,21 @@ vi.mock("@earendil-works/pi-ai/compat", () => ({
 	completeSimple: (...args: unknown[]) => completeSimpleMock(...args),
 }));
 
+/**
+ * Only SettingsManager is faked here (no file I/O in tests); every other
+ * export — including the real, un-mocked resolveModelScopeWithDiagnostics,
+ * which only touches the ctx.modelRegistry passed to it — comes through
+ * untouched via importActual.
+ */
+const settingsManagerMock = { getEnabledModels: vi.fn().mockReturnValue(undefined) };
+vi.mock("@earendil-works/pi-coding-agent", async () => {
+	const actual = await vi.importActual<typeof import("@earendil-works/pi-coding-agent")>("@earendil-works/pi-coding-agent");
+	return {
+		...actual,
+		SettingsManager: { create: () => settingsManagerMock },
+	};
+});
+
 const routerExtension = (await import("../extensions/model-router/index.ts")).default;
 
 const BASE_CONFIG = {
@@ -97,6 +112,7 @@ function createFakeCtx(): ExtensionContext {
 		signal: undefined,
 		modelRegistry: {
 			getAll: () => FAKE_MODELS,
+			getAvailable: () => FAKE_MODELS,
 			hasConfiguredAuth: () => true,
 			find: (provider: string, id: string) => FAKE_MODELS.find((m) => m.provider === provider && m.id === id),
 			getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: "sk-test", headers: {}, env: {} }),
@@ -130,6 +146,8 @@ beforeEach(() => {
 	// that actually exercise the write path override this to a real temp file.
 	globalConfigPathMock.mockReset();
 	globalConfigPathMock.mockReturnValue(path.join(os.tmpdir(), "model-router-test-nonexistent", "global.json"));
+	settingsManagerMock.getEnabledModels.mockReset();
+	settingsManagerMock.getEnabledModels.mockReturnValue(undefined);
 });
 
 describe("reload() mode preservation", () => {
@@ -306,6 +324,59 @@ describe("/router config wizard write path", () => {
 		// the session's active model, marked with the "▶" current-session marker.
 		expect(seenOptions[1]).toContain("▶");
 		expect(seenOptions[1]).toContain("test/validator-model");
+	});
+
+	it("filters the role picker down to the pi model scope when one is configured", async () => {
+		globalConfigPathMock.mockReturnValue(path.join(tmpDir, "global.json"));
+		settingsManagerMock.getEnabledModels.mockReturnValue(["test/planner-model", "test/executor-model"]);
+		const { commands, ctx } = await bootstrap();
+
+		let seenOptions: string[] = [];
+		(ctx.ui.select as ReturnType<typeof vi.fn>).mockImplementation(async (title: string, options: string[]) => {
+			if (title.includes("Which role")) return "validator";
+			if (title.startsWith("Model for")) {
+				seenOptions = options;
+				return options.find((o) => o.includes("Skip this role"));
+			}
+			if (title.includes("scope")) return options.find((o) => o.includes("Global"));
+			throw new Error(`unscripted select prompt: "${title}"`);
+		});
+
+		await commands.get("router")!("config", ctx as ExtensionCommandContext);
+
+		const modelOptions = seenOptions.filter((o) => o.includes("test/"));
+		expect(modelOptions).toHaveLength(2);
+		expect(modelOptions.some((o) => o.includes("test/planner-model"))).toBe(true);
+		expect(modelOptions.some((o) => o.includes("test/executor-model"))).toBe(true);
+		expect(modelOptions.some((o) => o.includes("test/toolparser-model"))).toBe(false);
+		expect(modelOptions.some((o) => o.includes("test/validator-model"))).toBe(false);
+
+		expect((ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.some((c) => String(c[0]).includes("Showing your pi model scope (2 models)"))).toBe(
+			true,
+		);
+	});
+
+	it("falls back to the full registry when no pi model scope is configured", async () => {
+		globalConfigPathMock.mockReturnValue(path.join(tmpDir, "global.json"));
+		settingsManagerMock.getEnabledModels.mockReturnValue(undefined);
+		const { commands, ctx } = await bootstrap();
+
+		let seenOptions: string[] = [];
+		(ctx.ui.select as ReturnType<typeof vi.fn>).mockImplementation(async (title: string, options: string[]) => {
+			if (title.includes("Which role")) return "validator";
+			if (title.startsWith("Model for")) {
+				seenOptions = options;
+				return options.find((o) => o.includes("Skip this role"));
+			}
+			if (title.includes("scope")) return options.find((o) => o.includes("Global"));
+			throw new Error(`unscripted select prompt: "${title}"`);
+		});
+
+		await commands.get("router")!("config", ctx as ExtensionCommandContext);
+
+		const modelOptions = seenOptions.filter((o) => o.includes("test/"));
+		expect(modelOptions).toHaveLength(FAKE_MODELS.length);
+		expect((ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.some((c) => String(c[0]).includes("No pi model scope configured"))).toBe(true);
 	});
 });
 
