@@ -5,6 +5,32 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-14
+
+### Added
+
+- Setup wizard (`/router setup` / `/router config`) now inherits your pi
+  model scope (`Settings.enabledModels`, the set `Ctrl+P` cycles): each
+  role's picker is filtered to those models, falling back to the full
+  registry only when no scope is configured. The active session model is
+  marked `▶` and sorted first; authed models are marked `✓`.
+- Non-wildcard model specs (exact id, bare id, or either with a `:thinking`
+  suffix) now resolve through pi's own model resolver, matching `/model`
+  semantics exactly (alias-over-dated preference, fuzzy match, thinking-level
+  suffix parsing). Trailing-`*` wildcard specs keep the router's own
+  authed-first matcher.
+- `/router` gains argument completions, a `/router help` subcommand, and a
+  warning on unknown subcommands instead of silently falling through to the
+  dashboard.
+- Human plan-approval gate for agent/debug modes (`routing.planGate`: `off`
+  (default) | `replace-validator` | `after-validator`). When enabled, the
+  pipeline pauses after planning so you can approve, request changes
+  (fed back to the planner for unlimited re-plan rounds), or proceed without
+  a plan. Toggle per-session with `/router gate <mode>`. Interactive-only —
+  forced off in `-p`/JSON/RPC mode.
+
+## [0.1.0] - 2026-07-11
+
 ### Added
 
 - Config & role resolution: global/project config merge with trust gating,
