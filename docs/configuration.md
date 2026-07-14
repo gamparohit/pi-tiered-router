@@ -34,15 +34,30 @@ the extension; the rest of the merge proceeds as if that file didn't exist.
 ## Setup
 
 `/router setup` walks all four roles in order (planner → validator → executor
-→ toolParser), one `ctx.ui.select` prompt per role listing the models actually
-present in your `pi` model registry — authed models (✓) sorted first — plus
-three extra choices: **keep current**, **custom spec…** (free-typed, wildcards
-allowed), and **skip this role** (validator/toolParser only; planner and
-executor are load-bearing for the pipeline to mean anything). After a
-thinking-level prompt per changed role, it asks once whether to save to the
-global config or the project config (project only offered when the project is
-trusted), writes the file (merged with whatever's already there), reloads, and
-shows the resolved roles.
+→ toolParser), one `ctx.ui.select` prompt per role. Each role's option list is
+ordered: the current pi session model first (marked `▶`), then models in your
+pi model scope (`◆` — pi's `Settings.enabledModels`, resolved the same way pi
+resolves `--models`), then the rest of the registry with authed models (`✓`)
+sorted ahead of unauthed ones — plus three extra choices: **keep current**,
+**custom spec…** (free-typed, wildcards allowed), and **skip this role**
+(validator/toolParser only; planner and executor are load-bearing for the
+pipeline to mean anything). Reading the scoped-model set is best-effort — if
+it can't be read, or none is configured, the wizard just falls back to the
+authed/rest ordering.
+
+A role's `model` spec resolves in one of two ways: a trailing-`*` wildcard
+(`anthropic/claude-opus-*`) is matched by the router itself, preferring a
+candidate that already has auth configured, then the newest id. Every other
+form — an exact `provider/id`, a bare id (`claude-fable-5`), or either with a
+`:thinking` suffix (`anthropic/claude-sonnet-5:high`, which overrides that
+role's configured thinking level) — is resolved by pi's own model resolver, so
+a config spec behaves exactly like typing the same string into pi's `/model`
+command.
+
+After a thinking-level prompt per changed role, it asks once whether to save to
+the global config or the project config (project only offered when the project
+is trusted), writes the file (merged with whatever's already there), reloads,
+and shows the resolved roles.
 
 `/router config` is the same wizard scoped to a single role you pick first —
 use it for a one-off tweak instead of walking all four.
@@ -53,6 +68,10 @@ start — it never blocks and never repeats within a session.
 
 Both commands require an interactive UI; in `-p`/JSON/RPC mode they print the
 global config path instead so you can edit it by hand.
+
+Run `/router help` (or press tab after typing `/router `) to see every
+subcommand — `setup`, `config`, `reload`, `auto`, `last`, `stats`, `trace[
+on|off]`, `toolparse [on|off]`, `help`.
 
 ## Shape
 

@@ -60,12 +60,24 @@ ready-made config files.
 ## Setup
 
 Want to point specific roles at different models? Run `/router setup` — it
-walks all four roles in order, one at a time, offering the models your `pi`
-install actually has available (authenticated ones marked and listed first),
-plus keep-current / type-a-custom-spec / skip-this-role options, then a
-thinking-level pick per role, then one prompt for global vs. project config
-scope. `/router config` is the same wizard scoped to a single role, for a
-quick one-off change.
+walks all four roles in order, one at a time. Each role's picker surfaces
+your current pi session model first (marked `▶`), then any models in your
+pi model scope (`◆`, from `Settings.enabledModels`), then everything else
+with configured auth listed next (`✓`) — plus keep-current /
+type-a-custom-spec / skip-this-role options. A spec without a wildcard (an
+exact id, a bare id, or either with a `:thinking` suffix) resolves with the
+same matching pi's own `/model` command uses; a trailing-`*` wildcard spec
+(`anthropic/claude-opus-*`) is matched by the router itself, preferring
+whichever candidate already has auth configured. After a thinking-level pick
+per changed role, it asks once whether to save to the global config or the
+project config (project only offered when the project is trusted), writes
+the file (merged with whatever's already there), reloads, and shows the
+resolved roles.
+
+`/router config` is the same wizard scoped to a single role you pick first —
+use it for a one-off tweak instead of walking all four. Run `/router help`
+any time to see every `/router` subcommand (also available via tab-completion
+after typing `/router `).
 
 If you start a session with unresolved roles and no config file yet,
 model-router shows a one-time nudge toward `/router setup` — never a blocking
