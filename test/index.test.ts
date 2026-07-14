@@ -61,13 +61,23 @@ const FAKE_MODELS = [
 function createFakePi() {
 	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
 	const commands = new Map<string, (args: string, ctx: ExtensionCommandContext) => unknown>();
+	const completions = new Map<string, (prefix: string) => unknown>();
 	const pi = {
 		on: vi.fn((event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
 			handlers.set(event, handler);
 		}),
-		registerCommand: vi.fn((name: string, opts: { handler: (args: string, ctx: ExtensionCommandContext) => unknown }) => {
-			commands.set(name, opts.handler);
-		}),
+		registerCommand: vi.fn(
+			(
+				name: string,
+				opts: {
+					handler: (args: string, ctx: ExtensionCommandContext) => unknown;
+					getArgumentCompletions?: (prefix: string) => unknown;
+				},
+			) => {
+				commands.set(name, opts.handler);
+				if (opts.getArgumentCompletions) completions.set(name, opts.getArgumentCompletions);
+			},
+		),
 		registerFlag: vi.fn(),
 		registerShortcut: vi.fn(),
 		registerTool: vi.fn(),
@@ -76,7 +86,7 @@ function createFakePi() {
 		setThinkingLevel: vi.fn(),
 		appendEntry: vi.fn(),
 	} as unknown as ExtensionAPI;
-	return { pi, handlers, commands };
+	return { pi, handlers, commands, completions };
 }
 
 function createFakeCtx(): ExtensionContext {
@@ -104,11 +114,11 @@ function createFakeCtx(): ExtensionContext {
 
 /** Wires the extension against a fresh fake pi/ctx and runs session_start once, as pi itself would on load. */
 async function bootstrap() {
-	const { pi, handlers, commands } = createFakePi();
+	const { pi, handlers, commands, completions } = createFakePi();
 	routerExtension(pi);
 	const ctx = createFakeCtx();
 	await handlers.get("session_start")!({ type: "session_start", reason: "new" }, ctx);
-	return { handlers, commands, ctx };
+	return { handlers, commands, completions, ctx };
 }
 
 beforeEach(() => {
@@ -394,5 +404,42 @@ describe("Phase 2 escalation: validator rejections maxed out", () => {
 		expect((ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0]).toContain(
 			'validator rejections maxed out — escalating pinned tier to "complex"',
 		);
+	});
+});
+
+describe("/router discoverability", () => {
+	it("getArgumentCompletions lists subcommands filtered by prefix", async () => {
+		const { completions } = await bootstrap();
+		const getCompletions = completions.get("router")!;
+
+		const all = (await getCompletions("")) as { value: string }[];
+		expect(all.map((c) => c.value)).toContain("setup");
+		expect(all.map((c) => c.value)).toContain("help");
+
+		const filtered = (await getCompletions("tr")) as { value: string }[];
+		expect(filtered.map((c) => c.value).sort()).toEqual(["trace", "trace off", "trace on"]);
+	});
+
+	it('"/router help" prints the subcommand list', async () => {
+		const { commands, ctx } = await bootstrap();
+		await commands.get("router")!("help", ctx as ExtensionCommandContext);
+		const lastNotify = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as string;
+		expect(lastNotify).toContain("/router subcommands:");
+		expect(lastNotify).toContain("setup");
+	});
+
+	it("warns on an unknown subcommand instead of silently showing the dashboard", async () => {
+		const { commands, ctx } = await bootstrap();
+		await commands.get("router")!("bogus", ctx as ExtensionCommandContext);
+		const lastNotify = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as string;
+		expect(lastNotify).toContain('Unknown /router subcommand "bogus"');
+	});
+
+	it("the no-arg dashboard still renders and points at /router help", async () => {
+		const { commands, ctx } = await bootstrap();
+		await commands.get("router")!("", ctx as ExtensionCommandContext);
+		const lastNotify = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as string;
+		expect(lastNotify).toContain("roles:");
+		expect(lastNotify).toContain("/router help");
 	});
 });

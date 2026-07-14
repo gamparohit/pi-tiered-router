@@ -392,7 +392,11 @@ export default function (pi: ExtensionAPI) {
 			const anyUnresolved = ROLE_NAMES.some((r) => !roles![r].model && !roles![r].skipped);
 			if (noConfigYet && anyUnresolved) {
 				firstRunHintShown = true;
-				notify(ctx, 'model-router: some roles are unresolved and no config file exists yet — run "/router setup" to configure all four interactively.', "info");
+				notify(
+					ctx,
+					'model-router: some roles are unresolved and no config file exists yet — run "/router setup" to configure all four interactively (or "/router help" to see all subcommands).',
+					"info",
+				);
 			}
 		}
 	});
@@ -494,10 +498,43 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	const ROUTER_SUBCOMMANDS: { value: string; description: string }[] = [
+		{ value: "setup", description: "guided setup for all four roles" },
+		{ value: "config", description: "guided setup for one role" },
+		{ value: "reload", description: "re-read config files and re-resolve roles" },
+		{ value: "auto", description: "resume auto-routing after a manual model/thinking override" },
+		{ value: "last", description: "show the last pipeline run's trace notes" },
+		{ value: "stats", description: "session token/cost stats" },
+		{ value: "trace", description: "show debug-mode wire-trace status" },
+		{ value: "trace on", description: "enable debug-mode wire tracing" },
+		{ value: "trace off", description: "disable debug-mode wire tracing" },
+		{ value: "toolparse on", description: "enable tool-output compression" },
+		{ value: "toolparse off", description: "disable tool-output compression" },
+		{ value: "help", description: "show this list" },
+	];
+
+	const ROUTER_HELP = [
+		"/router subcommands:",
+		...ROUTER_SUBCOMMANDS.map((c) => `  ${c.value.padEnd(14)} ${c.description}`),
+		"",
+		"/router (no args) shows the status dashboard.",
+	].join("\n");
+
 	pi.registerCommand("router", {
-		description: "model-router status dashboard: resolved roles, mode, config sources",
+		description: "model-router status dashboard: resolved roles, mode, config sources — try /router help",
+		getArgumentCompletions: (prefix) =>
+			ROUTER_SUBCOMMANDS.filter((c) => c.value.startsWith(prefix.toLowerCase())).map((c) => ({
+				value: c.value,
+				label: c.value,
+				description: c.description,
+			})),
 		handler: async (args, ctx: ExtensionCommandContext) => {
 			const sub = args.trim().toLowerCase();
+
+			if (sub === "help") {
+				notify(ctx, ROUTER_HELP, "info");
+				return;
+			}
 
 			if (sub === "reload") {
 				reload(ctx);
@@ -571,6 +608,11 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			if (sub !== "") {
+				notify(ctx, `Unknown /router subcommand "${sub}".\n\n${ROUTER_HELP}`, "warning");
+				return;
+			}
+
 			const lines = [
 				`mode: ${modeState.current} (${describeMode(modeState.current)})`,
 				overridePinned ? "routing: PINNED (manual model override active — /router auto to resume)" : "routing: auto",
@@ -585,6 +627,8 @@ export default function (pi: ExtensionAPI) {
 				`subagents: ${config.subagents.enabled ? `enabled (max ${config.subagents.maxParallel}, timeout ${config.subagents.timeoutMs}ms)` : "disabled"}`,
 				"",
 				stats.summarize(),
+				"",
+				'Run "/router help" to see all subcommands.',
 			];
 
 			notify(ctx, lines.join("\n"), "info");
