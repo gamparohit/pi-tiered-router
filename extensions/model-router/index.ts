@@ -3,13 +3,13 @@ import * as path from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, resolveModelScopeWithDiagnostics, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { CONFIG_FILENAME, globalConfigPath, loadConfig, PRESET_NAMES, VALID_THINKING } from "./config.ts";
 import { checkReadOnly } from "./guard.ts";
 import { isReadOnlyMode, ModeState, describeMode, modeSystemPromptAddendum } from "./modes.ts";
 import { applyRoleForTurn, type PipelineApplyResult, planAndValidate, runAgentPipeline, runAskMode } from "./pipeline.ts";
-import { describeRole, resolveAllRoles, rolesForTier } from "./roles.ts";
+import { describeRole, modelKey, orderModelsForRole, resolveAllRoles, rolesForTier } from "./roles.ts";
 import { nextTierUp } from "./router.ts";
 import { SessionStats } from "./stats.ts";
 import { runSubagents, type SubagentTask } from "./subagents.ts";
@@ -161,18 +161,53 @@ export default function (pi: ExtensionAPI) {
 		return role === "validator" || role === "toolParser";
 	}
 
-	/** Prompt for a role's model: real registry models (authed first) plus keep/custom/skip. Returns undefined if the user cancels. */
-	async function selectModelForRole(ctx: ExtensionCommandContext, role: RoleName): Promise<RoleSelection | undefined> {
+	/** One-line explanation of each role, shown in its setup-wizard picker title. */
+	const ROLE_DESCRIPTIONS: Record<RoleName, string> = {
+		planner: "decomposes the goal into a numbered plan",
+		validator: "independently critiques the plan before execution (up to 2 revision rounds)",
+		executor: "writes the code once the plan is validated",
+		toolParser: "classifies task complexity and compresses noisy tool output",
+	};
+
+	/**
+	 * Resolve pi's scoped-model patterns (Settings.enabledModels — the set the
+	 * user curates for Ctrl+P cycling) to a "provider/id" key set, so the wizard
+	 * can surface models the user already scoped ahead of the rest of the
+	 * registry. Best-effort: any failure, or no scope configured, degrades to an
+	 * empty set rather than blocking setup — inheriting is a bonus, not a
+	 * requirement for the wizard to work.
+	 */
+	async function resolveScopedModelIds(ctx: ExtensionCommandContext): Promise<Set<string>> {
+		try {
+			const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
+			const patterns = settings.getEnabledModels();
+			if (!patterns || patterns.length === 0) return new Set();
+			const { scopedModels } = await resolveModelScopeWithDiagnostics(patterns, ctx.modelRegistry);
+			return new Set(scopedModels.map((sm) => modelKey(sm.model)));
+		} catch {
+			return new Set();
+		}
+	}
+
+	/** Prompt for a role's model: the current session model and scoped models surfaced first (marked), then authed models, plus keep/custom/skip. Returns undefined if the user cancels. */
+	async function selectModelForRole(
+		ctx: ExtensionCommandContext,
+		role: RoleName,
+		scopedIds: Set<string>,
+	): Promise<RoleSelection | undefined> {
 		const current = roles?.[role];
-		const all = ctx.modelRegistry.getAll();
-		const sorted = [...all].sort((a, b) => {
-			const aAuth = ctx.modelRegistry.hasConfiguredAuth(a) ? 1 : 0;
-			const bAuth = ctx.modelRegistry.hasConfiguredAuth(b) ? 1 : 0;
-			if (aAuth !== bAuth) return bAuth - aAuth;
-			return `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`);
+		const sorted = orderModelsForRole({
+			all: ctx.modelRegistry.getAll(),
+			currentModel: ctx.model,
+			scopedIds,
+			hasAuth: (m) => ctx.modelRegistry.hasConfiguredAuth(m),
 		});
-		const modelLabel = (m: (typeof sorted)[number]) =>
-			`${ctx.modelRegistry.hasConfiguredAuth(m) ? "✓" : " "} ${m.provider}/${m.id}`;
+		const modelLabel = (m: (typeof sorted)[number]) => {
+			const key = modelKey(m);
+			const scopeMark = ctx.model && modelKey(ctx.model) === key ? "▶" : scopedIds.has(key) ? "◆" : " ";
+			const authMark = ctx.modelRegistry.hasConfiguredAuth(m) ? "✓" : " ";
+			return `${scopeMark}${authMark} ${key}`;
+		};
 
 		const keepLabel = `Keep current (${current?.skipped ? "skipped" : (current?.resolvedId ?? `unresolved: ${current?.requested}`)})`;
 		const customLabel = "Custom spec… (type provider/model-id, wildcards like anthropic/claude-opus-* allowed)";
@@ -180,7 +215,7 @@ export default function (pi: ExtensionAPI) {
 		const canSkip = roleCanBeSkipped(role);
 
 		const options = [keepLabel, ...sorted.map(modelLabel), customLabel, ...(canSkip ? [skipLabel] : [])];
-		const picked = await ctx.ui.select(`Model for the "${role}" role`, options);
+		const picked = await ctx.ui.select(`Model for the "${role}" role — ${ROLE_DESCRIPTIONS[role]}`, options);
 		if (picked === undefined) return undefined;
 
 		if (picked === keepLabel) return { kind: "keep" };
@@ -268,11 +303,14 @@ export default function (pi: ExtensionAPI) {
 	 * check `ctx.hasUI` first.
 	 */
 	async function runSetupWizard(ctx: ExtensionCommandContext, targetRoles: RoleName[]): Promise<void> {
+		const scopedIds = await resolveScopedModelIds(ctx);
+		notify(ctx, "▶ current session model   ◆ in your pi model scope   ✓ auth configured", "info");
+
 		const updates: Partial<Record<RoleName, { model: string; thinking: ThinkingLevel }>> = {};
 		const changedRoles: RoleName[] = [];
 
 		for (const role of targetRoles) {
-			const selection = await selectModelForRole(ctx, role);
+			const selection = await selectModelForRole(ctx, role, scopedIds);
 			if (!selection || selection.kind === "keep") continue;
 
 			if (selection.kind === "skip") {

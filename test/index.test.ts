@@ -273,6 +273,30 @@ describe("/router config wizard write path", () => {
 		await commands.get("router")!("config", ctx as ExtensionCommandContext);
 		expect((ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0]).toContain(path.join(tmpDir, "global.json"));
 	});
+
+	it("surfaces the current session model first, marked, in the role picker", async () => {
+		globalConfigPathMock.mockReturnValue(path.join(tmpDir, "global.json"));
+		const { commands, ctx } = await bootstrap();
+		(ctx as unknown as { model: (typeof FAKE_MODELS)[number] }).model = FAKE_MODELS[3]; // "test/validator-model"
+
+		let seenOptions: string[] = [];
+		(ctx.ui.select as ReturnType<typeof vi.fn>).mockImplementation(async (title: string, options: string[]) => {
+			if (title.includes("Which role")) return "validator";
+			if (title.startsWith("Model for")) {
+				seenOptions = options;
+				return options.find((o) => o.includes("Skip this role"));
+			}
+			if (title.includes("scope")) return options.find((o) => o.includes("Global"));
+			throw new Error(`unscripted select prompt: "${title}"`);
+		});
+
+		await commands.get("router")!("config", ctx as ExtensionCommandContext);
+
+		// Index 0 is "Keep current"; index 1 is the first model option and must be
+		// the session's active model, marked with the "▶" current-session marker.
+		expect(seenOptions[1]).toContain("▶");
+		expect(seenOptions[1]).toContain("test/validator-model");
+	});
 });
 
 describe("Phase 2 escalation: consecutive tool failures", () => {
