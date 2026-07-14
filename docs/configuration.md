@@ -72,7 +72,35 @@ global config path instead so you can edit it by hand.
 
 Run `/router help` (or press tab after typing `/router `) to see every
 subcommand — `setup`, `config`, `reload`, `auto`, `last`, `stats`, `trace[
-on|off]`, `toolparse [on|off]`, `help`.
+on|off]`, `toolparse [on|off]`, `gate [off|replace-validator|after-validator]`,
+`help`.
+
+## Plan-approval gate
+
+In **agent** and **debug** modes the pipeline plans and validates a task and
+then executes it automatically. `routing.planGate` inserts a human checkpoint
+between planning and execution:
+
+- **`off`** (default) — fully automated, exactly as before.
+- **`replace-validator`** — the automated validator is skipped and *you* review
+  the plan instead.
+- **`after-validator`** — the automated validator runs its normal (≤2 round)
+  pass first, then you review whatever plan comes out of it.
+
+When the gate opens you get three choices: **Approve** (send the plan to the
+executor), **Request changes…** (type a note; it's fed back to the planner,
+which re-plans — repeatable as many rounds as you like), or **Proceed without a
+plan** (run the turn unguided). Dismissing the dialog (Escape) is treated as
+"proceed without a plan" — an unreviewed plan is never forced through.
+
+The gate is interactive-only: in `-p`/JSON/RPC mode it's forced `off` so
+non-interactive runs never block. It applies to agent/debug only — `plan` mode
+is already a manual, read-only review with nothing to execute afterward, and
+`ask` mode doesn't plan.
+
+Toggle it for the session with `/router gate <mode>` (a `/router reload`
+re-reads the file value); set it persistently in a config file under
+`routing.planGate`. `/router gate` with no argument shows the current mode.
 
 ## Shape
 
@@ -95,6 +123,7 @@ interface RoutingConfig {
   trivialBypass: boolean;            // skip plan+validate for trivial tasks
   toolOutputParseThreshold: number;  // bytes; below this, tool output passes through untouched
   tiers?: Partial<Record<Complexity, Partial<Record<RoleName, RoleConfig | "skip">>>>; // opt-in per-tier model overrides — see docs/routing.md
+  planGate?: "off" | "replace-validator" | "after-validator"; // human plan-approval gate (agent/debug); default "off"
 }
 
 interface SubagentConfig {

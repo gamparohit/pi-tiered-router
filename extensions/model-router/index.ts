@@ -19,6 +19,8 @@ import {
 	type Complexity,
 	MODE_NAMES,
 	type ModeName,
+	type PlanGate,
+	PLAN_GATE_MODES,
 	type ResolvedRole,
 	ROLE_NAMES,
 	type RoleName,
@@ -518,8 +520,18 @@ export default function (pi: ExtensionAPI) {
 		{ value: "trace off", description: "disable debug-mode wire tracing" },
 		{ value: "toolparse on", description: "enable tool-output compression" },
 		{ value: "toolparse off", description: "disable tool-output compression" },
+		{ value: "gate", description: "show the plan-approval gate mode" },
+		{ value: "gate off", description: "disable the human plan gate" },
+		{ value: "gate replace-validator", description: "human gate replaces the automated validator" },
+		{ value: "gate after-validator", description: "human gate runs after the automated validator" },
 		{ value: "help", description: "show this list" },
 	];
+
+	const GATE_DESCRIPTIONS: Record<PlanGate, string> = {
+		off: "fully automated — no plan approval prompt",
+		"replace-validator": "you review the plan; the automated validator is skipped",
+		"after-validator": "the automated validator runs first, then you review",
+	};
 
 	const ROUTER_HELP = [
 		"/router subcommands:",
@@ -558,6 +570,27 @@ export default function (pi: ExtensionAPI) {
 
 			if (sub === "stats") {
 				notify(ctx, stats.summarize(), "info");
+				return;
+			}
+
+			if (sub === "gate" || sub.startsWith("gate ")) {
+				if (!config) {
+					notify(ctx, "not initialized yet", "warning");
+					return;
+				}
+				const arg = sub.slice("gate".length).trim();
+				if (!arg) {
+					const current = (config.routing.planGate ?? "off") as PlanGate;
+					notify(ctx, `plan gate: ${current} — ${GATE_DESCRIPTIONS[current]} (agent/debug modes only)`, "info");
+					return;
+				}
+				if (!PLAN_GATE_MODES.includes(arg as PlanGate)) {
+					notify(ctx, `Unknown gate mode "${arg}". Valid: ${PLAN_GATE_MODES.join(", ")}`, "error");
+					return;
+				}
+				// Session-only, like toolparse/trace — a `/router reload` re-reads the file value.
+				config.routing.planGate = arg as PlanGate;
+				notify(ctx, `plan gate: ${arg} — ${GATE_DESCRIPTIONS[arg as PlanGate]}`, "info");
 				return;
 			}
 
@@ -630,6 +663,7 @@ export default function (pi: ExtensionAPI) {
 				"",
 				`routing.classifier: ${config.routing.classifier}`,
 				`routing.trivialBypass: ${config.routing.trivialBypass}`,
+				`routing.planGate: ${config.routing.planGate ?? "off"} (agent/debug; /router gate to change)`,
 				`routing.toolOutputParseThreshold: ${config.routing.toolOutputParseThreshold}B (toolparse: ${toolparseEnabled ? "on" : "off"})`,
 				`routing.tiers: ${config.routing.tiers ? Object.keys(config.routing.tiers).join(", ") : "not configured"}${pinnedTier ? ` — pinned this session at "${pinnedTier}"` : ""}${consecutiveToolFailures > 0 ? ` (${consecutiveToolFailures}/${TOOL_FAILURE_ESCALATION_THRESHOLD} consecutive tool failures)` : ""}`,
 				`subagents: ${config.subagents.enabled ? `enabled (max ${config.subagents.maxParallel}, timeout ${config.subagents.timeoutMs}ms)` : "disabled"}`,

@@ -50,6 +50,11 @@ rather update deliberately — pinned specs are left alone by `pi update`.
    trace notes from the most recent pipeline run.
 5. Switch modes with `/mode <plan|agent|ask|debug>` or cycle through them
    with `ctrl+alt+m`.
+6. Want to approve the plan before agent/debug mode executes it? Turn on the
+   human gate with `/router gate replace-validator` (or `after-validator`) —
+   the pipeline pauses after planning so you can approve, request changes
+   (re-planned as many rounds as you like), or proceed without a plan. See
+   [`docs/configuration.md`](docs/configuration.md#plan-approval-gate).
 
 Nothing to configure for the default experience — `pi-tiered-router` ships
 with an all-Anthropic default (Opus plans, Fable validates, Sonnet executes,

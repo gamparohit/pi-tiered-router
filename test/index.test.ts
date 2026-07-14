@@ -513,6 +513,39 @@ describe("/router discoverability", () => {
 		expect(lastNotify).toContain("roles:");
 		expect(lastNotify).toContain("/router help");
 	});
+
+	it("getArgumentCompletions includes the gate subcommands", async () => {
+		const { completions } = await bootstrap();
+		const filtered = (await completions.get("router")!("gate")) as { value: string }[];
+		expect(filtered.map((c) => c.value).sort()).toEqual(["gate", "gate after-validator", "gate off", "gate replace-validator"]);
+	});
+});
+
+describe("/router gate command", () => {
+	it("shows the current gate mode with no argument", async () => {
+		const { commands, ctx } = await bootstrap();
+		await commands.get("router")!("gate", ctx as ExtensionCommandContext);
+		const lastNotify = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as string;
+		expect(lastNotify).toContain("plan gate: off");
+	});
+
+	it("sets a valid gate mode and it takes effect for the pipeline", async () => {
+		const { commands, ctx } = await bootstrap();
+		await commands.get("router")!("gate replace-validator", ctx as ExtensionCommandContext);
+		const lastNotify = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as string;
+		expect(lastNotify).toContain("plan gate: replace-validator");
+		// The dashboard reflects the session change too.
+		(ctx.ui.notify as ReturnType<typeof vi.fn>).mockClear();
+		await commands.get("router")!("", ctx as ExtensionCommandContext);
+		expect((ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0]).toContain("routing.planGate: replace-validator");
+	});
+
+	it("rejects an unknown gate mode", async () => {
+		const { commands, ctx } = await bootstrap();
+		await commands.get("router")!("gate bogus", ctx as ExtensionCommandContext);
+		const lastNotify = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as string;
+		expect(lastNotify).toContain('Unknown gate mode "bogus"');
+	});
 });
 
 describe("human plan gate", () => {
