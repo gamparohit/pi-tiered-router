@@ -1,6 +1,7 @@
+import type { Model } from "@earendil-works/pi-ai";
 import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { beforeEach, describe, expect, it } from "vitest";
-import { resolveAllRoles, resolveRole, rolesForTier, shortModelLabel } from "../extensions/model-router/roles.ts";
+import { orderModelsForRole, resolveAllRoles, resolveRole, rolesForTier, shortModelLabel } from "../extensions/model-router/roles.ts";
 import { DEFAULT_CONFIG } from "../extensions/model-router/config.ts";
 import type { ResolvedRole, RoleName, RouterConfig } from "../extensions/model-router/types.ts";
 
@@ -221,5 +222,44 @@ describe("resolveRole — pi-delegated non-wildcard resolution", () => {
 		const r = resolveRole(registry, "toolParser", { model: "anthropic/claude-haiku-4-5", thinking: "off" }, []);
 		expect(r.model?.id).toBe("claude-haiku-4-5");
 		expect(r.thinking).toBe("off");
+	});
+});
+
+describe("orderModelsForRole", () => {
+	// Model<any> requires several other fields (name, api, baseUrl, cost, ...)
+	// that this ordering logic never reads — "as unknown as" is the same
+	// partial-fake-data pattern test/index.test.ts uses for FAKE_MODELS.
+	function m(provider: string, id: string): Model<any> {
+		return { provider, id } as unknown as Model<any>;
+	}
+
+	it("orders the current session model first", () => {
+		const all = [m("anthropic", "claude-opus-4-8"), m("anthropic", "claude-fable-5"), m("anthropic", "claude-sonnet-5")];
+		const out = orderModelsForRole({ all, currentModel: m("anthropic", "claude-fable-5"), scopedIds: new Set(), hasAuth: () => false });
+		expect(out[0]).toEqual(m("anthropic", "claude-fable-5"));
+	});
+
+	it("orders scoped models ahead of authed-but-unscoped models, which are ahead of the rest", () => {
+		const all = [m("anthropic", "claude-opus-4-8"), m("anthropic", "claude-fable-5"), m("anthropic", "claude-sonnet-5")];
+		const out = orderModelsForRole({
+			all,
+			currentModel: undefined,
+			scopedIds: new Set(["anthropic/claude-fable-5"]),
+			hasAuth: (mm) => mm.id === "claude-opus-4-8",
+		});
+		expect(out.map((mm) => mm.id)).toEqual(["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5"]);
+	});
+
+	it("breaks ties within the same rank alphabetically by provider/id", () => {
+		const all = [m("anthropic", "claude-sonnet-5"), m("anthropic", "claude-fable-5")];
+		const out = orderModelsForRole({ all, currentModel: undefined, scopedIds: new Set(), hasAuth: () => false });
+		expect(out.map((mm) => mm.id)).toEqual(["claude-fable-5", "claude-sonnet-5"]);
+	});
+
+	it("does not mutate the input array", () => {
+		const all = [m("anthropic", "claude-sonnet-5"), m("anthropic", "claude-fable-5")];
+		const copy = [...all];
+		orderModelsForRole({ all, currentModel: undefined, scopedIds: new Set(), hasAuth: () => false });
+		expect(all).toEqual(copy);
 	});
 });

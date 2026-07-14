@@ -196,3 +196,40 @@ export function shortModelLabel(r: ResolvedRole): string {
 	if (m?.[1]) return m[1].toLowerCase();
 	return id.split(/[-_]/)[0] ?? id;
 }
+
+/** "provider/id" key for a model — used to match against the current session model and the scoped-model set. */
+export function modelKey(m: { provider: string; id: string }): string {
+	return `${m.provider}/${m.id}`;
+}
+
+/**
+ * Order a role's model options for the setup wizard: the current pi session
+ * model first, then models in pi's scoped-model set (Settings.enabledModels,
+ * resolved by the caller), then authed/available models, then the rest —
+ * ties within a rank break alphabetically by "provider/id" for a stable,
+ * predictable list. Pure and synchronous so it's testable without a registry
+ * or UI context; `index.ts`'s setup wizard supplies the real registry data.
+ */
+export function orderModelsForRole(input: {
+	all: Model<any>[];
+	currentModel: Model<any> | undefined;
+	scopedIds: Set<string>;
+	hasAuth: (m: Model<any>) => boolean;
+}): Model<any>[] {
+	const { all, currentModel, scopedIds, hasAuth } = input;
+	const currentKey = currentModel ? modelKey(currentModel) : undefined;
+
+	function rank(m: Model<any>): number {
+		if (currentKey && modelKey(m) === currentKey) return 0;
+		if (scopedIds.has(modelKey(m))) return 1;
+		if (hasAuth(m)) return 2;
+		return 3;
+	}
+
+	return [...all].sort((a, b) => {
+		const ra = rank(a);
+		const rb = rank(b);
+		if (ra !== rb) return ra - rb;
+		return modelKey(a).localeCompare(modelKey(b));
+	});
+}
