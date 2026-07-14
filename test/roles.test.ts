@@ -179,3 +179,47 @@ describe("shortModelLabel", () => {
 		expect(shortModelLabel(r)).toBe("—");
 	});
 });
+
+describe("resolveRole — pi-delegated non-wildcard resolution", () => {
+	it("resolves a bare model id with no provider prefix", () => {
+		const registry = registryWithAuth(["anthropic"]);
+		const r = resolveRole(registry, "validator", { model: "claude-fable-5", thinking: "medium" }, []);
+		expect(r.skipped).toBe(false);
+		expect(r.model?.provider).toBe("anthropic");
+		expect(r.model?.id).toBe("claude-fable-5");
+		expect(r.thinking).toBe("medium"); // no ":thinking" suffix in the spec — configured level applies
+	});
+
+	it('overrides the configured thinking level when the spec carries a ":thinking" suffix', () => {
+		const registry = registryWithAuth(["anthropic"]);
+		const r = resolveRole(registry, "executor", { model: "anthropic/claude-sonnet-5:high", thinking: "medium" }, []);
+		expect(r.model?.id).toBe("claude-sonnet-5");
+		expect(r.thinking).toBe("high"); // spec-embedded level wins over the configured "medium"
+	});
+
+	it("prefers the alias id over the dated id on a fuzzy (non-exact, non-wildcard) spec", () => {
+		const registry = registryWithAuth(["anthropic"]);
+		// "opus-4-5" is a substring of both "claude-opus-4-5" (alias) and
+		// "claude-opus-4-5-20251101" (dated) — pi's fuzzy matcher prefers the alias.
+		const r = resolveRole(registry, "planner", { model: "anthropic/opus-4-5", thinking: "high" }, []);
+		expect(r.model?.id).toBe("claude-opus-4-5");
+	});
+
+	it("does not fabricate a placeholder model for an unmatched id under a known provider", () => {
+		// pi's own resolveCliModel synthesizes a placeholder Model for CLI convenience
+		// when a provider is recognized but the id isn't (so users can type not-yet-
+		// registered ids). The router must reject that and stay unresolved instead —
+		// silently driving requests at a made-up model is worse than a warning.
+		const registry = registryWithAuth(["anthropic"]);
+		const r = resolveRole(registry, "executor", { model: "anthropic/claude-totally-made-up-id", thinking: "medium" }, []);
+		expect(r.skipped).toBe(false);
+		expect(r.model).toBeUndefined();
+	});
+
+	it("still resolves an exact provider/id spec that has no alias/dated ambiguity", () => {
+		const registry = registryWithAuth(["anthropic"]);
+		const r = resolveRole(registry, "toolParser", { model: "anthropic/claude-haiku-4-5", thinking: "off" }, []);
+		expect(r.model?.id).toBe("claude-haiku-4-5");
+		expect(r.thinking).toBe("off");
+	});
+});
