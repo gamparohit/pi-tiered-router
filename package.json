@@ -1,6 +1,6 @@
 {
   "name": "pi-tiered-router",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Automatically route work across models (planner/validator/executor/tool-parser) to produce the best possible output in pi. Quality-first orchestration with plan/agent/ask/debug modes.",
   "keywords": [
     "pi-package",
