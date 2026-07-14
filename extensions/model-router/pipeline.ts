@@ -158,6 +158,13 @@ export interface PlanAndValidateOutcome {
 	 * skipped/unresolved, or never reached at all).
 	 */
 	validatorRejectionsMaxedOut: boolean;
+	/**
+	 * True when the human plan gate ended without an approval — the user chose
+	 * "proceed without a plan" or dismissed the dialog. The turn still runs (the
+	 * executor is still switched in), but no plan is injected into context.
+	 * Always false when the gate is off or was never reached.
+	 */
+	planDeclined: boolean;
 }
 
 /** Render the final plan + any validator notes as injectable markdown. */
@@ -168,6 +175,64 @@ export function buildPlanMarkdown(plan: PlanResult, validation?: ValidationResul
 		lines.push("", `Validator (${validation.verdict}): ${validation.notes}`);
 	}
 	return lines.join("\n");
+}
+
+const GATE_APPROVE = "Approve — send this plan to the executor";
+const GATE_REQUEST = "Request changes…";
+const GATE_SKIP = "Proceed without a plan (run unguided)";
+
+/**
+ * Human plan-approval gate. Shows the plan and loops on the user's choice:
+ * approve (proceed as-is), request changes (feed the note back to the planner
+ * and re-show), or proceed without a plan (declined — the turn still runs, but
+ * nothing is injected). A dismissed dialog (Escape / aborted signal → undefined)
+ * is treated as "proceed without a plan": never force an unreviewed plan
+ * through. Unlimited rounds — a human is approving each one, so there's no
+ * runaway risk. UI-only; callers must gate on ctx.hasUI before calling.
+ */
+async function runHumanPlanGate(
+	ctx: ExtensionContext,
+	plannerRole: ResolvedRole,
+	prompt: string,
+	classification: ClassificationResult | undefined,
+	initialPlan: PlanResult,
+	initialValidation: ValidationResult | undefined,
+	signal: AbortSignal | undefined,
+	onProgress: ((label: string) => void) | undefined,
+	stats: SessionStats | undefined,
+	notes: string[],
+): Promise<{ plan: PlanResult; declined: boolean }> {
+	let plan = initialPlan;
+	let validation = initialValidation;
+	for (;;) {
+		ctx.ui.notify(buildPlanMarkdown(plan, validation), "info");
+		onProgress?.("awaiting plan review…");
+		const choice = await ctx.ui.select("Review the plan before execution", [GATE_APPROVE, GATE_REQUEST, GATE_SKIP], { signal });
+
+		if (choice === GATE_APPROVE) {
+			notes.push("human gate: approved");
+			return { plan, declined: false };
+		}
+		if (choice === undefined || choice === GATE_SKIP) {
+			notes.push(choice === undefined ? "human gate: dismissed — proceeding without a plan" : "human gate: proceeding without a plan");
+			return { plan, declined: true };
+		}
+
+		// Request changes: collect a note and re-plan with it as guidance.
+		const feedback = await ctx.ui.input("What should change about the plan?");
+		if (!feedback) {
+			notes.push("human gate: no change described; re-showing the plan");
+			continue;
+		}
+		notes.push(`human gate: revision requested — ${feedback}`);
+		const replanned = await generatePlan(ctx, plannerRole, prompt, classification, signal, feedback, onProgress, stats);
+		if (!replanned) {
+			notes.push("human gate: re-plan failed; keeping the prior plan");
+			continue;
+		}
+		plan = replanned;
+		validation = undefined; // a human-driven re-plan supersedes any earlier validator note
+	}
 }
 
 /**
@@ -189,6 +254,7 @@ export async function planAndValidate(
 	onProgress?: (label: string) => void,
 	stats?: SessionStats,
 	pinnedTier?: Complexity,
+	allowHumanGate = false,
 ): Promise<PlanAndValidateOutcome> {
 	const notes: string[] = [];
 
@@ -209,45 +275,60 @@ export async function planAndValidate(
 
 	if (shouldBypassPipeline(config, classification)) {
 		notes.push("trivial-bypass: skipping plan/validate");
-		return { classification, bypassed: true, revisions: 0, notes, effectiveTier, validatorRejectionsMaxedOut: false };
+		return { classification, bypassed: true, revisions: 0, notes, effectiveTier, validatorRejectionsMaxedOut: false, planDeclined: false };
 	}
 
 	let plan = await generatePlan(ctx, tierRoles.planner, prompt, classification, signal, undefined, onProgress, stats);
 	if (!plan) {
 		notes.push(`planner unresolved/failed (wanted ${tierRoles.planner.requested}); no plan injected`);
-		return { classification, bypassed: false, revisions: 0, notes, effectiveTier, validatorRejectionsMaxedOut: false };
+		return { classification, bypassed: false, revisions: 0, notes, effectiveTier, validatorRejectionsMaxedOut: false, planDeclined: false };
 	}
 	notes.push(`plan generated: ${plan.steps.length} step(s)`);
+
+	// The human gate (agent/debug only, when configured) can replace or follow
+	// the automated validator. It's UI-only, so it's forced off in -p/JSON mode.
+	const gate: "off" | "replace-validator" | "after-validator" =
+		allowHumanGate && ctx.hasUI ? (config.routing.planGate ?? "off") : "off";
 
 	let validation: ValidationResult | undefined;
 	let revisions = 0;
 	let validatorRejectionsMaxedOut = false;
-	for (;;) {
-		validation = await validatePlan(ctx, tierRoles.validator, prompt, plan, signal, onProgress, stats);
-		if (!validation) {
-			notes.push("validator unresolved/skipped; proceeding with unvalidated plan");
-			break;
-		}
-		notes.push(`validation round ${revisions}: ${validation.verdict}`);
-		if (validation.verdict !== "revise") break;
-		if (revisions >= MAX_REVISIONS) {
-			notes.push(`max revisions (${MAX_REVISIONS}) reached; proceeding with validator notes attached`);
-			validatorRejectionsMaxedOut = true;
-			break;
-		}
-		revisions++;
-		if (validation.revisedSteps && validation.revisedSteps.length > 0) {
-			plan = { ...plan, steps: validation.revisedSteps };
-			notes.push(`applied validator's revised steps (round ${revisions})`);
-		} else {
-			const replanned = await generatePlan(ctx, tierRoles.planner, prompt, classification, signal, validation.notes, onProgress, stats);
-			if (!replanned) {
-				notes.push("re-plan after revision request failed; proceeding with prior plan");
+	if (gate !== "replace-validator") {
+		for (;;) {
+			validation = await validatePlan(ctx, tierRoles.validator, prompt, plan, signal, onProgress, stats);
+			if (!validation) {
+				notes.push("validator unresolved/skipped; proceeding with unvalidated plan");
 				break;
 			}
-			plan = replanned;
-			notes.push(`planner re-generated plan (round ${revisions})`);
+			notes.push(`validation round ${revisions}: ${validation.verdict}`);
+			if (validation.verdict !== "revise") break;
+			if (revisions >= MAX_REVISIONS) {
+				notes.push(`max revisions (${MAX_REVISIONS}) reached; proceeding with validator notes attached`);
+				validatorRejectionsMaxedOut = true;
+				break;
+			}
+			revisions++;
+			if (validation.revisedSteps && validation.revisedSteps.length > 0) {
+				plan = { ...plan, steps: validation.revisedSteps };
+				notes.push(`applied validator's revised steps (round ${revisions})`);
+			} else {
+				const replanned = await generatePlan(ctx, tierRoles.planner, prompt, classification, signal, validation.notes, onProgress, stats);
+				if (!replanned) {
+					notes.push("re-plan after revision request failed; proceeding with prior plan");
+					break;
+				}
+				plan = replanned;
+				notes.push(`planner re-generated plan (round ${revisions})`);
+			}
 		}
+	}
+
+	let planDeclined = false;
+	if (gate === "replace-validator" || gate === "after-validator") {
+		const gated = await runHumanPlanGate(ctx, tierRoles.planner, prompt, classification, plan, validation, signal, onProgress, stats, notes);
+		plan = gated.plan;
+		planDeclined = gated.declined;
+		if (planDeclined) validation = undefined; // nothing was approved; don't attach a stale validator note
 	}
 
 	return {
@@ -260,6 +341,7 @@ export async function planAndValidate(
 		notes,
 		effectiveTier,
 		validatorRejectionsMaxedOut,
+		planDeclined,
 	};
 }
 
@@ -292,7 +374,7 @@ export async function runAgentPipeline(
 	onBeforeModelSwitch?: () => void,
 	pinnedTier?: Complexity,
 ): Promise<PipelineApplyResult> {
-	const outcome = await planAndValidate(ctx, roles, config, prompt, signal, onProgress, stats, pinnedTier);
+	const outcome = await planAndValidate(ctx, roles, config, prompt, signal, onProgress, stats, pinnedTier, true);
 	// Re-derive the tier-adjusted roles for the executor step — planAndValidate
 	// already applied them internally for planner/validator, but returns only the
 	// outcome (not its internal roles map), so this recomputes the same (cheap,
@@ -333,6 +415,7 @@ export async function runAskMode(
 		revisions: 0,
 		notes,
 		validatorRejectionsMaxedOut: false,
+		planDeclined: false,
 	};
 	return applyRoleForTurn(pi, role, roles, outcome, undefined, skipModelSwitch, onBeforeModelSwitch);
 }
@@ -380,7 +463,7 @@ export async function applyRoleForTurn(
 	}
 
 	const message =
-		outcome.planText && !outcome.bypassed
+		outcome.planText && !outcome.bypassed && !outcome.planDeclined
 			? { customType: MESSAGE_CUSTOM_TYPE, content: outcome.planText, display: true }
 			: undefined;
 

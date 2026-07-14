@@ -514,3 +514,158 @@ describe("/router discoverability", () => {
 		expect(lastNotify).toContain("/router help");
 	});
 });
+
+describe("human plan gate", () => {
+	/** A config with the gate on. validatorActive swaps the skip'd validator for a real one (needed for after-validator). */
+	function gateConfig(planGate: "off" | "replace-validator" | "after-validator", validatorActive = false) {
+		const cfg = structuredClone(BASE_CONFIG) as typeof BASE_CONFIG & {
+			routing: typeof BASE_CONFIG.routing & { planGate: typeof planGate };
+		};
+		cfg.routing.planGate = planGate;
+		if (validatorActive) cfg.roles.validator = { model: "test/validator-model", thinking: "medium" };
+		return cfg;
+	}
+
+	/**
+	 * Scripts completeSimple by tool name. emit_plan can be a function so a
+	 * re-plan returns a different plan than the first pass (proves the gate's
+	 * request-changes loop actually re-invokes the planner).
+	 */
+	function scriptCalls(responses: Record<string, unknown | ((callIndex: number) => unknown)>) {
+		const counts: Record<string, number> = {};
+		completeSimpleMock.mockImplementation(async (_model: unknown, context: { tools?: Array<{ name: string }> }) => {
+			const toolName = context.tools?.[0]?.name ?? "";
+			const n = (counts[toolName] = (counts[toolName] ?? 0) + 1);
+			const spec = responses[toolName];
+			const value = typeof spec === "function" ? (spec as (i: number) => unknown)(n) : spec;
+			return {
+				role: "assistant",
+				content: value ? [{ type: "toolCall", id: `tc${n}`, name: toolName, arguments: value }] : [],
+				stopReason: "stop",
+				usage: {},
+				api: "anthropic-messages",
+				provider: "test",
+				model: "x",
+				timestamp: Date.now(),
+			};
+		});
+	}
+
+	const AGENT_EVENT = { type: "before_agent_start", prompt: "do something", systemPrompt: "base", images: undefined, systemPromptOptions: {} };
+
+	type GateResult = { message?: { content: string } } | undefined;
+
+	it("approve: injects the plan and moves on to the executor, without running the validator (replace-validator)", async () => {
+		loadConfigMock.mockReturnValue({ config: gateConfig("replace-validator"), warnings: [] });
+		const { handlers, ctx } = await bootstrap();
+		scriptCalls({
+			emit_classification: { complexity: "standard", needsPlan: true, reason: "x" },
+			emit_plan: { summary: "the approach", steps: ["[main] first step"] },
+			emit_validation: { verdict: "revise", notes: "should never be called" },
+		});
+		(ctx.ui.select as ReturnType<typeof vi.fn>).mockImplementation(async (_t: string, opts: string[]) => opts.find((o) => o.includes("Approve")));
+
+		const result = (await handlers.get("before_agent_start")!(AGENT_EVENT, ctx)) as GateResult;
+
+		// Plan was injected (gate approved) and it reached the executor.
+		expect(result?.message?.content).toContain("the approach");
+		expect(result?.message?.content).toContain("first step");
+		const notifyMessages = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+		expect(notifyMessages.some((m) => m.includes("test/executor-model"))).toBe(true);
+		// The validator tool was never offered — replace-validator skips it entirely.
+		const offeredTools = completeSimpleMock.mock.calls.map((c) => (c[1] as { tools?: Array<{ name: string }> }).tools?.[0]?.name);
+		expect(offeredTools).not.toContain("emit_validation");
+		expect(offeredTools).toContain("emit_plan");
+	});
+
+	it("request changes then approve: re-invokes the planner with the feedback and injects the revised plan", async () => {
+		loadConfigMock.mockReturnValue({ config: gateConfig("replace-validator"), warnings: [] });
+		const { handlers, ctx } = await bootstrap();
+		scriptCalls({
+			emit_classification: { complexity: "standard", needsPlan: true, reason: "x" },
+			// First plan on call 1, revised plan on call 2.
+			emit_plan: (n: number) => (n === 1 ? { summary: "v1", steps: ["[main] original"] } : { summary: "v2", steps: ["[main] revised with error handling"] }),
+		});
+		let selectCalls = 0;
+		(ctx.ui.select as ReturnType<typeof vi.fn>).mockImplementation(async (_t: string, opts: string[]) => {
+			selectCalls++;
+			return selectCalls === 1 ? opts.find((o) => o.includes("Request changes")) : opts.find((o) => o.includes("Approve"));
+		});
+		(ctx.ui.input as ReturnType<typeof vi.fn>).mockResolvedValue("add error handling");
+
+		const result = (await handlers.get("before_agent_start")!(AGENT_EVENT, ctx)) as GateResult;
+
+		// The planner ran twice (initial + re-plan), the user was asked for feedback, and the revised plan is what got injected.
+		const planCalls = completeSimpleMock.mock.calls.filter((c) => (c[1] as { tools?: Array<{ name: string }> }).tools?.[0]?.name === "emit_plan");
+		expect(planCalls).toHaveLength(2);
+		expect((ctx.ui.input as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
+		expect(result?.message?.content).toContain("revised with error handling");
+		expect(result?.message?.content).not.toContain("original");
+	});
+
+	it("proceed without a plan: injects nothing but still switches to the executor", async () => {
+		loadConfigMock.mockReturnValue({ config: gateConfig("replace-validator"), warnings: [] });
+		const { handlers, commands, ctx } = await bootstrap();
+		scriptCalls({
+			emit_classification: { complexity: "standard", needsPlan: true, reason: "x" },
+			emit_plan: { summary: "the approach", steps: ["[main] first step"] },
+		});
+		(ctx.ui.select as ReturnType<typeof vi.fn>).mockImplementation(async (_t: string, opts: string[]) => opts.find((o) => o.includes("Proceed without")));
+
+		const result = (await handlers.get("before_agent_start")!(AGENT_EVENT, ctx)) as GateResult;
+
+		// No plan injected...
+		expect(result?.message).toBeUndefined();
+		// ...but the executor was still switched in (turn proceeds unguided).
+		const notifyMessages = (ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+		expect(notifyMessages.some((m) => m.includes("test/executor-model"))).toBe(true);
+		// The decision is recorded in the trace for /router last.
+		await commands.get("router")!("last", ctx as ExtensionCommandContext);
+		expect((ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0]).toContain("proceeding without a plan");
+	});
+
+	it("dismissing the dialog (undefined) is treated as proceed-without-a-plan, never a forced plan", async () => {
+		loadConfigMock.mockReturnValue({ config: gateConfig("replace-validator"), warnings: [] });
+		const { handlers, ctx } = await bootstrap();
+		scriptCalls({
+			emit_classification: { complexity: "standard", needsPlan: true, reason: "x" },
+			emit_plan: { summary: "the approach", steps: ["[main] first step"] },
+		});
+		(ctx.ui.select as ReturnType<typeof vi.fn>).mockResolvedValue(undefined); // Escape / aborted
+
+		const result = (await handlers.get("before_agent_start")!(AGENT_EVENT, ctx)) as GateResult;
+		expect(result?.message).toBeUndefined();
+	});
+
+	it("after-validator: the automated validator runs first, then the human gate", async () => {
+		loadConfigMock.mockReturnValue({ config: gateConfig("after-validator", true), warnings: [] });
+		const { handlers, ctx } = await bootstrap();
+		const callOrder: string[] = [];
+		completeSimpleMock.mockImplementation(async (_model: unknown, context: { tools?: Array<{ name: string }> }) => {
+			const toolName = context.tools?.[0]?.name ?? "";
+			callOrder.push(toolName);
+			const value =
+				toolName === "emit_classification"
+					? { complexity: "standard", needsPlan: true, reason: "x" }
+					: toolName === "emit_plan"
+						? { summary: "s", steps: ["[main] a"] }
+						: toolName === "emit_validation"
+							? { verdict: "approve", notes: "looks good" }
+							: undefined;
+			return { role: "assistant", content: value ? [{ type: "toolCall", id: "tc", name: toolName, arguments: value }] : [], stopReason: "stop", usage: {}, api: "anthropic-messages", provider: "test", model: "x", timestamp: Date.now() };
+		});
+		let selectCalledAfterValidation = false;
+		(ctx.ui.select as ReturnType<typeof vi.fn>).mockImplementation(async (_t: string, opts: string[]) => {
+			selectCalledAfterValidation = callOrder.includes("emit_validation");
+			return opts.find((o) => o.includes("Approve"));
+		});
+
+		const result = (await handlers.get("before_agent_start")!(AGENT_EVENT, ctx)) as GateResult;
+
+		// Validator ran (its tool was offered) and the gate opened only after it.
+		expect(callOrder).toContain("emit_validation");
+		expect(selectCalledAfterValidation).toBe(true);
+		// Approved plan carries the validator note through to the injected message.
+		expect(result?.message?.content).toContain("looks good");
+	});
+});
