@@ -1,0 +1,51 @@
+{
+  "name": "pi-tiered-router",
+  "version": "0.1.0",
+  "description": "Automatically route work across models (planner/validator/executor/tool-parser) to produce the best possible output in pi. Quality-first orchestration with plan/agent/ask/debug modes.",
+  "keywords": [
+    "pi-package",
+    "model-routing",
+    "orchestration",
+    "claude",
+    "agent"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./extensions/model-router/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "files": [
+    "extensions",
+    "skills",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.6",
+    "@earendil-works/pi-ai": "^0.80.6",
+    "@earendil-works/pi-agent-core": "^0.80.6",
+    "@earendil-works/pi-tui": "^0.80.6",
+    "typebox": "^1.3.6",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "@types/node": "^22.0.0"
+  }
+}
